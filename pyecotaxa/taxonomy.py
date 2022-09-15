@@ -38,7 +38,7 @@ def load_taxonomy(taxoexport_fn, cache=True) -> anytree.Node:
     taxoexport = pd.read_csv(taxoexport_fn, sep="\t", index_col=None)
 
     print("Converting taxoexport...")
-    progress = tqdm(descr="", total=len(taxoexport), unit_scale=True)
+    progress = tqdm(total=len(taxoexport), unit_scale=True)
 
     def create_children(parent, parent_id=None, depth=0):
         children = (
@@ -157,7 +157,7 @@ def map_categories(
     matcher = Matcher(taxonomy, mapping_dict, case_insensitive=case_insensitive)
 
     mapping_new = []
-    for label in labels_df["label"].unique():
+    for label in labels_df["label"].dropna().unique():
         # Skip already processed
         if label in mapping_dict:
             continue
