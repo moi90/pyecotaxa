@@ -27,6 +27,8 @@ setup(
         "werkzeug",
         "semantic_version",
         "atomicwrites",
+        "click",
+        "anytree",
     ],
     python_requires=">=3.6",
     extras_require={
@@ -43,7 +45,7 @@ setup(
         ],
         "dev": ["black", "versioneer"],
     },
-    entry_points={},
+    entry_points={"console_scripts": ["pyecotaxa=pyecotaxa.cli:cli"]},
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.9",
