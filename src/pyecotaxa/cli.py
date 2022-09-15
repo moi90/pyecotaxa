@@ -97,7 +97,7 @@ def _read_txt(fn) -> Tuple[pd.DataFrame, Dict]:
     if ext == ".tsv":
         options["sep"] = "\t"
 
-    return pd.read_csv(fn, index_col=False, **options, header=0), options
+    return pd.read_csv(fn, index_col=False, **options, header=0, dtype=str), options
 
 
 @cli.command()
@@ -118,7 +118,8 @@ def map_categories(taxoexport_fn, mapping_fn, labels_fn):
 
     if "label" not in labels.columns:
         print(
-            f"Column 'label' missing in {labels_fn}: {list(labels.columns)}!", file=sys.stderr
+            f"Column 'label' missing in {labels_fn}: {list(labels.columns)}!",
+            file=sys.stderr,
         )
         sys.exit(-1)
 
