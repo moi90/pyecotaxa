@@ -32,7 +32,7 @@ def test_read_tsv(enforce_types, type_header):
 
     assert list(dataframe.columns) == ["a", "b", "c", "d"]
 
-    if type_header:
+    if type_header and enforce_types:
         assert [dt.kind for dt in dataframe.dtypes] == ["O", "f", "O", "O"]
         assert_series_equal(dataframe["d"], pd.Series(["", ""]), check_names=False)
     else:
@@ -65,7 +65,7 @@ def test_read_tsv_usecols(enforce_types, type_header):
 
     assert list(dataframe.columns) == ["a", "b"]
 
-    if type_header:
+    if type_header and enforce_types:
         assert [dt.kind for dt in dataframe.dtypes] == ["O", "f"]
     else:
         assert [dt.kind for dt in dataframe.dtypes] == ["i", "f"]
@@ -100,6 +100,7 @@ def test_write_tsv(type_header):
         )
 
     # Check round tripping
+    # 
     dataframe2 = read_tsv(StringIO(content))
     assert_frame_equal(dataframe, dataframe2)
 
@@ -113,6 +114,28 @@ def test_empty_str_column():
     assert [dt.kind for dt in dataframe.dtypes] == ["O", "f", "O"]
 
     assert_series_equal(dataframe["a"], pd.Series([""]), check_names=False)
+
+
+def test_read_tsv_default_uses_default_dtypes():
+    file_content = "object_id\timg_rank\nabc\t1\n"
+
+    dataframe = read_tsv(StringIO(file_content))
+
+    assert dataframe["object_id"].dtype.kind == "O"
+    assert dataframe["img_rank"].dtype.kind in ("i", "u")
+
+
+def test_read_tsv_dtype_overrides_enforce_types():
+    file_content = "a\tb\n[t]\t[f]\n1\t2\n"
+
+    dataframe = read_tsv(
+        StringIO(file_content),
+        enforce_types=True,
+        dtype={"a": "Int64", "b": "Int64"},
+    )
+
+    assert str(dataframe["a"].dtype) == "Int64"
+    assert str(dataframe["b"].dtype) == "Int64"
 
 
 @pytest.mark.parametrize("ext", [".tar", ".zip"])

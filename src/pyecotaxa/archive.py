@@ -55,7 +55,7 @@ VALID_PREFIXES = {"object", "sample", "acq", "process", "img"}
 
 def _parse_tsv_header(
     f: IOBase, encoding: str
-) -> Tuple[Optional[Sequence[str]], Dict[str, Any], int]:
+) -> Tuple[Optional[Sequence[str]], Optional[Dict[str, Any]], int]:
     skiprows = 0
 
     header: List[str] = []
@@ -74,7 +74,7 @@ def _parse_tsv_header(
             header.append(line)
 
     if not header:
-        return None, {}, 0
+        return None, None, 0
 
     csv_reader = csv.reader(header, delimiter="\t")
 
@@ -84,7 +84,7 @@ def _parse_tsv_header(
         maybe_types = next(csv_reader)
     except StopIteration:
         # No second line
-        return names, {}, skiprows
+        return names, None, skiprows
 
     if len(names) != len(maybe_types):
         raise ValueError("Number of names does not match number of types")
@@ -95,7 +95,7 @@ def _parse_tsv_header(
         dtype = {n: str for n, t in zip(names, maybe_types) if t == "[t]"}
     else:
         # This wasn't a type row after all
-        dtype = {}
+        dtype = None
         skiprows -= 1
 
     return names, dtype, skiprows
@@ -117,8 +117,7 @@ def read_tsv(
 
     The dtype of each column is determined by the following precedence order:
         1. `dtype` parameter (if provided explicitly).
-        2. DEFAULT_DTYPES, containing the correct dtype for well-known columns.
-        3. File header (if the file includes a type header).
+        2. File header (if `enforce_types` is True) or DEFAULT_DTYPES (if `enforce_types` is False).
 
     Args:
         fn_or_f (str, pathlib.Path, or file-like):
@@ -126,10 +125,11 @@ def read_tsv(
         encoding (str, optional):
             The encoding to use for reading the file. Defaults to "utf-8-sig".
         enforce_types (bool, optional):
-            Require an explicit EcoTaxa type header. Raises ValueError when missing.
+            Whether to enforce the column dtypes provided in the type header.
+            If omitted sensible defaults from DEFAULT_DTYPES are used.
         dtype (dict, optional):
-            A dictionary specifying the data types of columns. Defaults to `None`,
-            which uses the default types.
+            A dictionary specifying the data types of columns.
+            If provided, it overrides both `enforce_types` and DEFAULT_DTYPES.
         **kwargs:
             Additional keyword arguments passed to `pandas.read_csv()`.
 
@@ -143,10 +143,6 @@ def read_tsv(
     must_close = False
     f: BinaryIO
 
-    if dtype is None:
-        dtype = DEFAULT_DTYPES
-    else:
-        dtype = {**DEFAULT_DTYPES, **dtype}
 
     if isinstance(fn_or_f, str):
         fn_or_f = pathlib.Path(fn_or_f)
@@ -171,10 +167,18 @@ def read_tsv(
             header_f = BytesIO(f.peek(8 * 1024))  # type: ignore
             names, header_dtype, skiprows = _parse_tsv_header(header_f, encoding)
 
-        if enforce_types and not header_dtype:
-            raise ValueError("enforce_types=True, but no type header was found.")
+        if enforce_types is None:
+            # Default behavior: enforce types from header if present, otherwise use defaults
+            enforce_types = header_dtype is not None
 
-        dtype = {**header_dtype, **dtype}
+        if enforce_types:
+            if header_dtype is None:
+                raise ValueError("enforce_types=True, but no type header was found.")
+            
+            dtype = {**header_dtype, **(dtype or {})}  # Merge header dtype with user-specified dtype
+        else:
+            dtype = {**DEFAULT_DTYPES, **(dtype or {})}  # Merge default dtype with user-specified dtype
+
 
         # Detect duplicate names
         duplicate_names = [
@@ -188,7 +192,14 @@ def read_tsv(
                 + (", ".join(duplicate_names))
             )
 
-        dataframe = pd.read_csv(f, sep="\t", names=names, dtype=dtype, skiprows=skiprows, **kwargs)  # type: ignore
+        dataframe = pd.read_csv(
+            f,
+            sep="\t",
+            names=names,
+            dtype=dtype,
+            skiprows=skiprows,
+            **kwargs,
+        )  # type: ignore
 
         for c, dt in dataframe.dtypes.items():
             if pd.api.types.is_string_dtype(dt):
