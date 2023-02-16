@@ -146,5 +146,6 @@ def check_config(config):
 default_config = {
     "api_endpoint": "https://ecotaxa.obs-vlfr.fr/api/",
     "exported_data_share": None,
+    "import_data_share": None,
     "api_token": None,
 }
