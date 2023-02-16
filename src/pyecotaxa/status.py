@@ -35,6 +35,7 @@ def _get_status_manager() -> "StatusManager":
 
 
 def progress_meter(
+    id,
     desc: Optional[str] = None,
     leave=False,
     unit="it",
@@ -44,8 +45,10 @@ def progress_meter(
     total=None,
     position=None,
 ):
+    """Create a new progress meter widget."""
     status_manager = _get_status_manager()
     return status_manager.progress_meter(
+        id,
         desc=desc,
         leave=leave,
         unit=unit,
@@ -71,7 +74,7 @@ class StatusManager(abc.ABC):
         pass
 
     @abstractmethod
-    def progress_meter(self, *args, **kwargs) -> "ProgressMeter":
+    def progress_meter(self, id, *args, **kwargs) -> "ProgressMeter":
         ...
 
 
@@ -90,11 +93,15 @@ class ProgressMeter(abc.ABC):
         pass
 
     @abstractmethod
-    def set(self, n, desc=None):
+    def set_description(self, desc):
         pass
 
     @abstractmethod
-    def update(self, n=1, desc=None):
+    def set(self, n):
+        pass
+
+    @abstractmethod
+    def update(self, n=1):
         pass
 
     def reset(self, total=None):
@@ -111,7 +118,7 @@ class ProgressMeter(abc.ABC):
 
 
 class TqdmStatusManager(StatusManager):
-    def progress_meter(self, **kwargs) -> ProgressMeter:
+    def progress_meter(self, id, **kwargs) -> ProgressMeter:
         return TqdmProgressMeter(**kwargs)
 
 
@@ -143,21 +150,63 @@ class TqdmProgressMeter(ProgressMeter):
             position=position,
         )
 
-    def update(self, n=1, desc=None):
-        if desc is not None:
-            self.pm.set_description(desc)
+    def set_description(self, desc):
+        self.pm.set_description(desc)
 
+    def update(self, n=1):
         self.pm.update(n)
 
-    def set(self, n, desc=None):
-        if desc is not None:
-            self.pm.set_description(desc)
-
+    def set(self, n):
         self.pm.n = n
         self.pm.update(0)
 
     def close(self):
         self.pm.close()
+
+
+class JSONProgressMeter(ProgressMeter):
+    def dump(self):
+        return {
+            id: self.id,
+            unit: self.unit,
+            value: self.value,
+            total: self.total,
+            eta: self.eta,
+            elapsed: self.elapsed,
+            descr: self.descr,
+        }
+
+
+class JSONStatusManager(StatusManager):
+    """
+    {
+        progress: {
+            id: "",
+            unit: "",
+            current: 0,
+            total: 0,
+            eta: 0,
+            elapsed: 0,
+            descr: "",
+        }
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.widgets = []
+
+    def progress_meter(self, id, position=None, **kwargs) -> ProgressMeter:
+        widget = JSONProgressMeter(**kwargs)
+
+        # TODO: Insert at specified position (even when None, ...)
+        self.widgets.insert(position, widget)
+
+        return widget
+
+    def dump(self):
+        return [w.dump() for w in self.widgets]
 
 
 class ReportStatusManager(StatusManager):
