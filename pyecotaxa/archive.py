@@ -101,7 +101,7 @@ DEFAULT_DTYPES = {
 def read_tsv(
     filepath_or_buffer,
     encoding: str = "utf-8-sig",
-    enforce_types=False,
+    enforce_types: Optional[bool] = None,
     usecols: Union[None, Callable, List[str]] = None,
     dtype=None,
     **kwargs,
@@ -111,7 +111,7 @@ def read_tsv(
 
     Args:
         filepath_or_buffer (str, path object or file-like object): ...
-        encoding: Encoding of the TSV file.
+        encoding (str, optional): Encoding of the TSV file.
             With the default "utf-8-sig", both UTF8 and signed UTF8 can be read.
         enforce_types: Enforce the column dtypes provided in the header.
             Usually, it is desirable to use the default dtypes and allow pandas to infer the column dtypes.
