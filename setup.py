@@ -30,6 +30,7 @@ setup(
         "click",
         "anytree",
         "python-dateutil",
+        "requests_toolbelt",
     ],
     python_requires=">=3.6",
     extras_require={
