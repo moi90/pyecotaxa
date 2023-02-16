@@ -8,7 +8,7 @@ import shutil
 import tarfile
 import warnings
 import zipfile
-from typing import IO, Callable, List, Union
+from typing import IO, Callable, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -70,7 +70,7 @@ def _apply_usecols(
 def read_tsv(
     filepath_or_buffer,
     encoding: str = "utf-8-sig",
-    enforce_types=False,
+    enforce_types: Optional[bool] = None,
     usecols: Union[None, Callable, List[str]] = None,
     **kwargs,
 ) -> pd.DataFrame:
@@ -79,16 +79,24 @@ def read_tsv(
 
     Args:
         filepath_or_buffer (str, path object or file-like object): ...
-        encoding: Encoding of the TSV file.
+        encoding (str, optional): Encoding of the TSV file.
             With the default "utf-8-sig", both UTF8 and signed UTF8 can be read.
-        enforce_types: Enforce the column dtypes provided in the header.
-            Usually, it is desirable to allow pandas to infer the column dtypes.
+        enforce_types (bool, optional): Enforce the column dtypes provided in the header.
+            Usually, this is desirable for better interoperability with EcoTaxa.
+            (Otherwise, date and time values could lose their leading zeros.)
         usecols: List of strings or callable.
         **kwargs: Additional kwargs are passed to :func:`pandas:pandas.read_csv`.
 
     Returns:
         A Pandas :class:`~pandas:pandas.DataFrame`.
     """
+
+    if enforce_types is None:
+        # Enforce dtypes if no dtype was specified
+        enforce_types = "dtype" not in kwargs
+
+    if enforce_types:
+        kwargs.setdefault("dtype", str)
 
     if usecols is not None:
         chunksize = kwargs.pop("chunksize", 10000)
