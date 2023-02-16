@@ -1,11 +1,12 @@
-import json
+import getpass
 import os
 import sys
-from typing import Dict, Mapping, Tuple
+from typing import Dict, Tuple
 import click
 
 from pyecotaxa import __version__
-from pyecotaxa.meta import JsonConfig
+from pyecotaxa._config import JsonConfig, find_file_recursive
+from pyecotaxa.remote import Remote
 from pyecotaxa.transfer import Transfer
 import pyecotaxa.taxonomy
 import pandas as pd
@@ -20,8 +21,6 @@ def cli():  # pragma: no cover
 
 
 @cli.command()
-@click.option("--username", prompt=True)
-@click.option("--password", prompt=True, hide_input=True)
 @click.option(
     "--user",
     "destination",
@@ -36,7 +35,13 @@ def cli():  # pragma: no cover
     metavar="PATH",
     help="Run as if started in PATH instead of the current working directory.",
 )
-def login(username, password, chdir, destination):
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    help="Be verbose",
+)
+def login(chdir, destination, verbose):
     """
     Log in and store authentication token in the current working directory.
     """
@@ -45,9 +50,17 @@ def login(username, password, chdir, destination):
     if chdir:
         os.chdir(chdir)
 
-    config_fn = (
-        os.path.expanduser("~/.pyecotaxa") if destination == "user" else ".pyecotaxa"
+    config_fn = os.path.abspath(
+        os.path.expanduser("~/.pyecotaxa.json")
+        if destination == "user"
+        else find_file_recursive(".pyecotaxa.json")
     )
+
+    if verbose:
+        print("Config:", config_fn)
+
+    username = input("Username: ")
+    password = getpass.getpass()
 
     transfer = Transfer()
     transfer.login(username, password)
