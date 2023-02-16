@@ -1,14 +1,18 @@
 import concurrent.futures
 import enum
+import getpass
 import glob
 import os
 import shutil
 import time
+import traceback
 import urllib.parse
 import warnings
 import zipfile
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
+import posixpath
 
+from pyecotaxa.status import progress_meter
 import requests
 import semantic_version
 import tqdm
@@ -23,7 +27,20 @@ from pyecotaxa._config import (
     load_env,
 )
 
-DEFAULT_EXPORTED_DATA_SHARE = "/remote/plankton_rw/ftp_plankton/Ecotaxa_Exported_data/"
+
+
+
+class DummyExecutor(concurrent.futures.Executor):
+    def submit(self, fn, *args, **kwargs):
+        f = concurrent.futures.Future()
+
+        try:
+            f.set_result(fn(*args, **kwargs))
+        except Exception as exc:
+            f.set_exception(exc)
+            pass
+
+        return f
 
 
 def atomic_write(path, **kwargs):
@@ -42,11 +59,32 @@ class ApiVersionWarning(Warning):
     pass
 
 
+def show_trace(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except:
+            traceback.print_exc()
+            raise
+
+    return wrapper
+
+
 def removeprefix(s: str, prefix: str) -> str:
     """Polyfill for str.removeprefix introduced in Python 3.9."""
 
     if s.startswith(prefix):
         return s[len(prefix) :]
+    else:
+        return s[:]
+
+
+def removesuffix(s: str, suffix: str) -> str:
+    """Polyfill for str.removesuffix introduced in Python 3.9."""
+
+    if suffix and s.endswith(suffix):
+        return s[: -len(suffix)]
     else:
         return s[:]
 
@@ -57,19 +95,17 @@ def copyfile_progress(src, dst, chunksize=1024 ** 2):
     with open(src, "rb") as fsrc:
         total = os.fstat(fsrc.fileno()).st_size
 
-        print(src, "size", total)
-
-        with atomic_write(dst) as fdst:
-            n_written = 0
+        with atomic_write(dst) as fdst, progress_meter(
+            f"file:{dst}", unit="B", unit_scale=True, unit_binary=True, total=total
+        ) as pm:
+            buf = memoryview(bytearray(chunksize))
             while 1:
-                buf = fsrc.read(chunksize)
-                if not buf:
+                nbytes = fsrc.readinto(buf)
+                if not nbytes:
                     break
-                fdst.write(buf)
+                fdst.write(buf[:nbytes])
 
-                n_written += len(buf)
-
-                yield n_written, total
+                pm.update(nbytes)
 
 
 class State(enum.Enum):
@@ -183,16 +219,12 @@ class Remote(Obervable):
             **load_env(verbose=verbose),
         }
 
-        # Update config from parameters
         if api_endpoint is not None:
             config["api_endpoint"] = api_endpoint
+        
 
         if api_token is not None:
             config["api_token"] = api_token
-
-        if exported_data_share is True:
-            if os.path.isdir(DEFAULT_EXPORTED_DATA_SHARE):
-                exported_data_share = DEFAULT_EXPORTED_DATA_SHARE
 
         if exported_data_share is not None:
             config["exported_data_share"] = exported_data_share
@@ -232,9 +264,15 @@ class Remote(Obervable):
 
         self._check_response(response)
 
-        self.config["api_token"] = response.json()
+        self.api_token = response.json()
 
         self._notify_observers(None, message="Logged in successfully.")
+
+    def login_interactive(self):
+        username = input("Username: ")
+        password = getpass.getpass()
+
+        self.login(username, password)
 
     @property
     def auth_headers(self):
@@ -273,18 +311,17 @@ class Remote(Obervable):
         _, options = werkzeug.http.parse_options_header(
             response.headers["content-disposition"]
         )
-        filename = os.path.basename(options["filename"])
+        filename = posixpath.basename(options["filename"])
 
         dest = os.path.join(target_directory, filename)
+
+        print(f"Downloading {response.url} to {dest}...")
 
         try:
             self._notify_observers(
                 project_id, description=f"Downloading...", progress=0, total=1
             )
             with atomic_write(dest) as f:
-                total = (
-                    content_length / chunksize if content_length is not None else None
-                )
                 progress = 0
                 for chunk in response.iter_content(chunksize):
                     f.write(chunk)
@@ -331,16 +368,10 @@ class Remote(Obervable):
         # Local filename should not have the task_<id>_ prefix to match get_job_file_remote
         dest = os.path.join(target_directory, removeprefix(filename, f"task_{job_id}_"))
 
-        try:
-            for n_written, total in copyfile_progress(remote_fn, dest):
-                self._notify_observers(
-                    project_id,
-                    description=f"Copying...",
-                    progress=n_written,
-                    total=total,
-                    unit="iB",
-                )
+        print(f"Copying {remote_fn} to {dest}...")
 
+        try:
+            copyfile_progress(remote_fn, dest)
             shutil.copymode(remote_fn, dest)
         except:
             # Cleaup destination file
@@ -348,6 +379,7 @@ class Remote(Obervable):
                 os.remove(dest)
             except FileNotFoundError:
                 pass
+            raise
 
         return dest
 
@@ -415,52 +447,70 @@ class Remote(Obervable):
 
         return response.json()
 
+    def _wait_job_progress(self, job, task_descr: str):
+        """
+        Args:
+            job:
+            task_descr: Task description for progress meter.
+        """
+        with progress_meter(
+            "remote_export", desc=task_descr, total=100, unit="%"
+        ) as pm:
+            # 'P' for Pending (Waiting for an execution thread)
+            # 'R' for Running (Being executed inside a thread)
+            # 'A' for Asking (Needing user information before resuming)
+            # 'E' for Error (Stopped with error)
+            # 'F' for Finished (Done)."
+            while job["state"] not in "FE":
+                pm.set(
+                    job["progress_pct"] or 0,
+                )
+                pm.set_description(f"{task_descr} ({job['progress_msg']})")
+
+                time.sleep(5)
+
+                # Update job data
+                job = self._get_job(job["id"])
+
+        if job["state"] == "E":
+            raise JobError(job["progress_msg"])
+
+        return job
+
     def _download_archive(
         self, project_id, *, target_directory: str, with_images: bool
     ) -> str:
         """Export and download project."""
 
-        # Find finished export task for project_id
-        jobs = self._get_jobs()
-
+        # Find running or finished export task for project_id
         matches = [
             job
-            for job in jobs
-            if job.get("params", {}).get("req", {}).get("project_id") == project_id
+            for job in self._get_jobs()
+            if job.get("type") == "GenExport"
+            and job.get("params", {}).get("req", {}).get("project_id") == project_id
         ]
 
         if not matches:
             job = self._start_project_export(project_id, with_images=with_images)
         else:
+            print(f"Existing export job for {project_id}.")
             job = matches[0]
 
-        job_id = job["id"]
+        # Wait for job to be finished
+        job = self._wait_job_progress(job, f"Exporting {project_id}...")
 
-        # 'P' for Pending (Waiting for an execution thread)
-        # 'R' for Running (Being executed inside a thread)
-        # 'A' for Asking (Needing user information before resuming)
-        # 'E' for Error (Stopped with error)
-        # 'F' for Finished (Done)."
-        while job["state"] not in "FE":
-            self._notify_observers(
-                project_id,
-                description=f"Exporting ({job['progress_msg']})...",
-                progress=job["progress_pct"],
-                total=100,
-                state=State.RUNNING,
-                unit="%",
-            )
-
-            time.sleep(5)
-
-            # Update job data
-            job = self._get_job(job_id)
-
-        if job["state"] == "E":
-            raise JobError(job["progress_msg"])
+        print(f"Export job for {project_id} done.")
 
         # Download job file
-        return self._get_job_file(project_id, job, target_directory=target_directory)
+        archive_fn = self._get_job_file(
+            project_id, job, target_directory=target_directory
+        )
+
+        # Store metadata
+        job_params_req = job.get("params", {}).get("req", {})
+        FileMeta(archive_fn).update(job_params_req).save()
+
+        return archive_fn
 
     def _check_archive(self, project_id, archive_fn) -> str:
         self._notify_observers(
@@ -533,6 +583,7 @@ class Remote(Obervable):
             matches = glob.glob(pattern)
 
             if matches:
+                print(f"Export for {project_id} is available locally.")
                 archive_fn = matches[0]
             else:
                 archive_fn = self._download_archive(
@@ -540,6 +591,8 @@ class Remote(Obervable):
                     target_directory=target_directory,
                     with_images=with_images,
                 )
+
+            print(f"Got {archive_fn}.")
 
             if check_integrity:
                 self._check_archive(project_id, archive_fn)
@@ -554,7 +607,7 @@ class Remote(Obervable):
                 total=1,
                 state=State.FINISHED,
             )
-            return None
+            raise exc
 
         self._notify_observers(
             project_id, description="OK", progress=1, total=1, state=State.FINISHED
@@ -591,7 +644,7 @@ class Remote(Obervable):
         with_images=True,
     ) -> List[str]:
         """
-        Export a project and transfer to a local directory.
+        Export a project archive and transfer to a local directory.
 
         Args:
             project_ids (int or list): Project IDs to pull.
@@ -608,7 +661,10 @@ class Remote(Obervable):
 
         os.makedirs(target_directory, exist_ok=True)
 
-        executor = concurrent.futures.ThreadPoolExecutor(n_parallel)
+        if n_parallel:
+            executor = concurrent.futures.ThreadPoolExecutor(n_parallel)
+        else:
+            executor = DummyExecutor()
 
         self._notify_observers(
             None, description="Pulling projects...", total=len(project_ids), unit="proj"
@@ -616,7 +672,7 @@ class Remote(Obervable):
 
         futures = [
             executor.submit(
-                self._get_archive_for_project,
+                show_trace(self._get_archive_for_project),
                 project_id,
                 target_directory=target_directory,
                 check_integrity=check_integrity,
@@ -651,3 +707,140 @@ class Remote(Obervable):
         self._check_response(response)
 
         return response.json()
+
+    def _start_project_import(self, project_id, source_path):
+        response = requests.post(
+            urllib.parse.urljoin(self.api_endpoint, f"file_import/{project_id}"),
+            json={
+                "source_path": source_path,
+                "taxo_mappings": {},
+                "skip_loaded_files": False,
+                "skip_existing_objects": True,  # Has to be True for an update.
+                "update_mode": "Cla",  # Yes = Update metadata only. Cla = Also update classifications.
+            },
+            headers=self.auth_headers,
+        )
+
+        self._check_response(response)
+
+        data = response.json()
+
+        job_id = data["job_id"]
+
+        # Get job data
+        return self._get_job(job_id)
+
+    def _push_file(self, file_fn: str, project_id: int, *, source_directory):
+        print(f"Pushing {file_fn} to {project_id}...")
+
+        assert self.config["import_data_share"] is not None
+
+        dst_dir = os.path.join(self.config["import_data_share"], "pyecotaxa")
+        os.makedirs(dst_dir, exist_ok=True)
+
+        # Copy file into the import directory
+        src_fn = os.path.join(source_directory, file_fn)
+        dst_fn = os.path.join(dst_dir, file_fn)
+        if not os.path.isfile(dst_fn):
+            copyfile_progress(src_fn, dst_fn)
+            shutil.copymode(src_fn, dst_fn)
+
+        remote_fn = posixpath.join("FTP/Ecotaxa_Data_to_import/pyecotaxa", file_fn)
+
+        # Find running or finished import task for project_id
+        matches = [
+            job
+            for job in self._get_jobs()
+            if job.get("type") == "FileImport"
+            and job.get("params", {}).get("req", {}).get("project_id") == project_id
+        ]
+
+        if not matches:
+            job = self._start_project_import(project_id, remote_fn)
+        else:
+            job = matches[0]
+
+        # Wait for job to be finished
+        job = self._wait_job_progress(job, f"Importing to {project_id}...")
+
+        # TODO: Cleanup
+
+    def _validate_meta(self, root: str, meta: Mapping[str, Mapping[str, Any]]):
+        def validate():
+            for file_fn, file_meta in meta.items():
+                print(file_fn, meta)
+                if not os.path.isfile(os.path.join(root, file_fn)):
+                    print(f"WARNING: {file_fn} is missing.")
+                    continue
+
+                if "project_id" not in file_meta:
+                    print(f"WARNING: No project_id set for {file_fn}.")
+                    continue
+
+                yield (file_fn, file_meta)
+
+        return dict(validate())
+
+    def push(
+        self,
+        *,
+        source_directory=".",
+        meta=None,
+        project_ids=None,
+        n_parallel=1,
+    ):
+        """
+        Push a local checkout to EcoTaxa.
+
+        The respective projects need to already exist.
+
+        Args:
+            mode: create / update / update_with_classification
+        """
+
+        if meta is None:
+            meta = {}
+
+        for abs_meta_fn in glob.glob(
+            os.path.join(source_directory, "*" + FileMeta.SUFFIX)
+        ):
+            meta_fn = os.path.relpath(abs_meta_fn, source_directory)
+            file_fn = removesuffix(meta_fn, FileMeta.SUFFIX)
+
+            meta[file_fn] = FileMeta(abs_meta_fn).update(meta.get(file_fn, {}))
+
+        # Filter for existing files
+        meta = self._validate_meta(source_directory, meta)
+
+        # Filter project ids
+        if project_ids is not None:
+            meta = {
+                file_fn: file_meta
+                for file_fn, file_meta in meta.items()
+                if file_meta["project_id"] in project_ids
+            }
+
+        print(f"Pushing {len(meta)} archives...")
+
+        if n_parallel:
+            executor = concurrent.futures.ThreadPoolExecutor(n_parallel)
+        else:
+            executor = DummyExecutor()
+
+        futures = [
+            executor.submit(
+                self._push_file,
+                file_fn,
+                file_meta["project_id"],
+                source_directory=source_directory,
+            )
+            for file_fn, file_meta in meta.items()
+        ]
+
+        with progress_meter(
+            "total", unit="B", unit_scale=True, unit_binary=True, total=len(futures)
+        ) as pm:
+            for fut in concurrent.futures.as_completed(futures):
+                fut.result()
+                pm.update()
+	

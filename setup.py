@@ -28,6 +28,7 @@ setup(
         "atomicwrites",
         "click",
         "anytree",
+        "python-dateutil",
     ],
     python_requires=">=3.6",
     extras_require={

@@ -34,28 +34,27 @@ def load_taxonomy(taxoexport_fn, cache=True) -> anytree.Node:
                 pass
 
     # Otherwise, convert
-
-    taxoexport = pd.read_csv(taxoexport_fn, sep="\t", index_col=None)
+    taxoexport = pd.read_csv(taxoexport_fn, sep="\t", index_col=None, low_memory=False)
 
     print("Converting taxoexport...")
-    progress = tqdm(total=len(taxoexport), unit_scale=True)
+    with tqdm(total=len(taxoexport), unit_scale=True, leave=False) as progress:
 
-    def create_children(parent, parent_id=None, depth=0):
-        children = (
-            taxoexport[taxoexport["parent_id"] == parent_id]
-            if parent_id is not None
-            else taxoexport[taxoexport["parent_id"].isna()]
-        )
-        for c in children.itertuples():
-            n = anytree.Node(
-                str(c.name), parent=parent, unique_name=str(c.display_name)
+        def create_children(parent, parent_id=None, depth=0):
+            children = (
+                taxoexport[taxoexport["parent_id"] == parent_id]
+                if parent_id is not None
+                else taxoexport[taxoexport["parent_id"].isna()]
             )
-            progress.update()
+            for c in children.itertuples():
+                n = anytree.Node(
+                    str(c.name), parent=parent, unique_name=str(c.display_name)
+                )
+                progress.update()
 
-            create_children(n, parent_id=c.id, depth=depth + 1)
+                create_children(n, parent_id=c.id, depth=depth + 1)
 
-    traxotree = anytree.Node("#", unique_name="")
-    create_children(traxotree, None)
+        traxotree = anytree.Node("#", unique_name="")
+        create_children(traxotree, None)
 
     if cache:
         exporter = anytree.exporter.jsonexporter.JsonExporter()
@@ -63,6 +62,13 @@ def load_taxonomy(taxoexport_fn, cache=True) -> anytree.Node:
             exporter.write(traxotree, f)
 
     return traxotree
+
+
+def str_equal(a, b, case_insensitive=False):
+    if case_insensitive:
+        return a.lower() == b.lower()
+
+    return a == b
 
 
 class Matcher:
@@ -104,20 +110,31 @@ class Matcher:
         parts = path.split(self.separator)
 
         parts, remainder, unique_name = self._find_prefix(parts)
-        nodes = [
+
+        root = (
             anytree.search.find(self.tree, lambda node: node.unique_name == unique_name)
             if unique_name is not None
-            else self.tree
-        ]
+            else None
+        )
+        nodes = [root or self.tree]
 
         while remainder:
             name = remainder[0]
 
             matches = []
             for r in nodes:
-                matches.extend(
-                    anytree.search.findall(r, lambda node: self._cmp(node.name, name))
-                )
+                try:
+                    matches.extend(
+                        anytree.search.findall(
+                            r,
+                            lambda node: str_equal(
+                                node.name, name, self.case_insensitive
+                            ),
+                        )
+                    )
+                except:
+                    print(locals())
+                    raise
 
             if not matches:
                 break
@@ -127,18 +144,12 @@ class Matcher:
 
         return self.separator.join(parts), self.separator.join(remainder), nodes
 
-    def _cmp(self, a: str, b: str):
-        if self.case_insensitive:
-            return a.lower() == b.lower()
-
-        return a == b
-
 
 def _mapping_df_to_dict(mapping):
     if mapping is None:
         return {}
 
-    mapping = mapping[~pd.isna(mapping["object_annotation_category"])]
+    mapping = mapping[mapping["object_annotation_category"] != ""]
     return {row.label: row.object_annotation_category for row in mapping.itertuples()}
 
 
@@ -147,17 +158,45 @@ def map_categories(
     mapping_df: Optional[pd.DataFrame],
     labels_df: pd.DataFrame,
     case_insensitive=True,
+    validate_mapping=False,
 ):
 
     if mapping_df is None:
         mapping_df = pd.DataFrame(columns=["label", "object_annotation_category"])
+
+    # Validate mapping_dict by looking up the names in the taxonomy
+    if validate_mapping:
+        print("Validating existing assignments...")
+        invalid_mask = mapping_df["object_annotation_category"].map(
+            lambda unique_name: unique_name != ""
+            and anytree.search.find(
+                taxonomy,
+                lambda node: str_equal(node.unique_name, unique_name, case_insensitive),
+            )
+            is None
+        )
+        n_invalid = invalid_mask.sum()
+        if n_invalid:
+            print(
+                f"The following {n_invalid} categories do not exist in the global taxonomy file:",
+                ", ".join(
+                    mapping_df.loc[invalid_mask, "object_annotation_category"]
+                    .map(repr)
+                    .tolist()
+                ),
+            )
+        else:
+            print("All ok.")
 
     mapping_dict = _mapping_df_to_dict(mapping_df)
 
     matcher = Matcher(taxonomy, mapping_dict, case_insensitive=case_insensitive)
 
     mapping_new = []
-    for label in labels_df["label"].dropna().unique():
+    for label in labels_df["label"].unique():
+        if label == "":
+            continue
+
         # Skip already processed
         if label in mapping_dict:
             continue
@@ -200,8 +239,23 @@ def map_categories(
         .sort_values("label")
     )
 
+    # Merge only certain columns
+    mapping_df_slim = mapping_df[
+        mapping_df.columns[
+            mapping_df.columns.isin(
+                ["label", "object_annotation_category", "object_annotation_status"]
+            )
+        ]
+    ]
+
+    # Drop columns that will be update from mapping
     labels_df = labels_df.drop(
-        columns=["object_annotation_category"], errors="ignore"
-    ).merge(mapping_df[["label", "object_annotation_category"]], on="label")
+        columns=[c for c in mapping_df.columns if c != "label"], errors="ignore"
+    )
+
+    # Merge
+    labels_df = labels_df.merge(mapping_df_slim, on="label", how="left")
+
+    labels_df["object_annotation_category"].fillna("", inplace=True)
 
     return mapping_df, labels_df

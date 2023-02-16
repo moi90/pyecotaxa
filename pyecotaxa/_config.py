@@ -6,6 +6,13 @@ import warnings
 
 ENV_PREFIX = "PYECOTAXA_"
 
+DEFAULT_ECOTAXA_EXPORTED_DATA_SHARE = (
+    "/remote/plankton/ftp_plankton/Ecotaxa_Exported_data/"
+)
+DEFAULT_ECOTAXA_IMPORT_DATA_SHARE = (
+    "/remote/plankton/ftp_plankton/Ecotaxa_Data_to_import"
+)
+
 
 def find_file_recursive(filename: str) -> str:
     """Find a file from the current directory upwards."""
@@ -101,6 +108,12 @@ def check_config(config):
     if config["api_endpoint"][-1] != "/":
         config["api_endpoint"] = config["api_endpoint"] + "/"
 
+    if config["exported_data_share"] is True:
+        if os.path.isdir(DEFAULT_ECOTAXA_EXPORTED_DATA_SHARE):
+            config["exported_data_share"] = DEFAULT_ECOTAXA_EXPORTED_DATA_SHARE
+        else:
+            config["exported_data_share"] = None
+
     if config["exported_data_share"] is not None and not os.path.isdir(
         config["exported_data_share"]
     ):
@@ -110,6 +123,22 @@ def check_config(config):
             + " does not exist, resetting"
         )
         config["exported_data_share"] = None
+
+    if config["import_data_share"] is True:
+        if os.path.isdir(DEFAULT_ECOTAXA_IMPORT_DATA_SHARE):
+            config["import_data_share"] = DEFAULT_ECOTAXA_IMPORT_DATA_SHARE
+        else:
+            config["import_data_share"] = None
+
+    if config["import_data_share"] is not None and not os.path.isdir(
+        config["import_data_share"]
+    ):
+        warnings.warn(
+            "import_data_share"
+            + config["import_data_share"]
+            + " does not exist, resetting"
+        )
+        config["import_data_share"] = None
 
     return config
 
