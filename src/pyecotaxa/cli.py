@@ -17,7 +17,8 @@ import pyecotaxa.taxonomy
 from pyecotaxa._config import JsonConfig, find_file_recursive
 from pyecotaxa.archive import read_tsv, write_tsv
 from pyecotaxa.meta import FileMeta
-from pyecotaxa.remote import ProgressListener, Remote
+from pyecotaxa.remote import ProgressListener, Remote, Transport
+import logging
 
 warnings.simplefilter("error", pd.errors.DtypeWarning)
 
@@ -28,6 +29,8 @@ def cli():  # pragma: no cover
     """
     Command line client for pyecotaxa.
     """
+
+    logging.getLogger().setLevel(logging.INFO)
 
 
 @cli.command()
@@ -136,7 +139,31 @@ def pull(project_ids, with_images, chdir):
     metavar="PATH",
     help="Run as if started in PATH instead of the current working directory.",
 )
-def push(file_fns, project_id, chdir):
+@click.option(
+    "-f",
+    "--force",
+    is_flag=True,
+    help="Force upload even if present",
+)
+@click.option(
+    "--http",
+    "transport",
+    flag_value="http",
+    help="Use HTTP for data transfer",
+)
+@click.option(
+    "--ftp",
+    "transport",
+    flag_value="ftp",
+    help="Use FTP for data transfer",
+)
+@click.option(
+    "--share",
+    "transport",
+    flag_value="share",
+    help="Use file share for data transfer",
+)
+def push(file_fns, project_id, chdir, force, transport):
     """
     Push archives to the EcoTaxa server.
 
@@ -156,11 +183,21 @@ def push(file_fns, project_id, chdir):
     else:
         file_fn_project_id = [(file_fn, project_id) for file_fn in file_fns]
 
-    transfer = Remote()
+    remote = Remote()
 
-    print("Logged in as", transfer.current_user()["email"])
+    if transport is None:
+        transport = (
+            Transport.SHARE
+            if remote.config["import_data_share"] is not None
+            else Transport.HTTP
+        )
+    else:
+        transport = Transport(transport)
 
-    transfer.push(file_fn_project_id)
+    logging.info("Logged in as %s", remote.current_user()["email"])
+    logging.info(f"Transport: {transport}")
+
+    remote.push(file_fn_project_id, force=force, transport=transport)
 
 
 def _table_reader_writer(fn) -> Tuple[Callable, Callable]:
