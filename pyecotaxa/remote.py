@@ -10,11 +10,14 @@ import shutil
 import time
 import traceback
 import urllib.parse
+import uuid
 import warnings
 import zipfile
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
-
+import ftplib
 import requests
+import urllib3.util.retry
+import requests.adapters
 import requests_toolbelt
 import semantic_version
 import tqdm
@@ -30,7 +33,20 @@ from pyecotaxa._config import (
 )
 from pyecotaxa.status import progress_meter
 
-logger = logging.Logger(__name__)
+logger = logging.getLogger(__name__)
+
+
+class ImportMode(enum.Enum):
+    # Yes = Update metadata only. Cla = Also update classifications. Else create.
+    CREATE = "No"
+    UPDATE = "Yes"
+    UPDATE_ANNOTATE = "Cla"
+
+
+class Transport(enum.Enum):
+    SHARE = "share"
+    HTTP = "http"
+    FTP = "ftp"
 
 
 class DummyExecutor(concurrent.futures.Executor):
@@ -264,6 +280,13 @@ class Remote(Obervable):
         self.config = check_config(config)
 
         self._check_version()
+
+        # TODO: Use session everywhere
+        self._session = requests.Session()
+        retry = urllib3.util.retry.Retry(connect=3, backoff_factor=0.5)
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
 
     def _check_version(self):
         response = requests.get(
@@ -747,8 +770,8 @@ class Remote(Obervable):
 
         return response.json()
 
-    def _start_project_import(self, project_id, source_path):
-        print("Starting project import...")
+    def _start_project_import(self, project_id, source_path, mode: ImportMode):
+        logger.info("Starting project import...")
         response = requests.post(
             urllib.parse.urljoin(
                 self.config["api_endpoint"], f"file_import/{project_id}"
@@ -757,8 +780,8 @@ class Remote(Obervable):
                 "source_path": source_path,
                 "taxo_mappings": {},
                 "skip_loaded_files": False,
-                "skip_existing_objects": True,  # Has to be True for an update.
-                "update_mode": "Cla",  # Yes = Update metadata only. Cla = Also update classifications.
+                "skip_existing_objects": True,  # Has to be True for an update (so that updateable objects are calculated)
+                "update_mode": mode.value,
             },
             headers=self.auth_headers,
         )
@@ -775,6 +798,7 @@ class Remote(Obervable):
     def _get_remote_fn_by_hashh(self, fhash):
         # Currently, the /my_files endpoint is broken
         # See https://github.com/ecotaxa/ecotaxa_back/issues/56
+        # TODO: source_path = "/tmp/ecotaxa_user.{CREATOR_USER_ID}/{TAG}/{DEST_FILE_NAME}"
         return None
 
         response = requests.get(
@@ -800,21 +824,32 @@ class Remote(Obervable):
 
         return posixpath.join(data["path"], entry["name"])
 
-    def _upload_file_http(self, src_fn) -> str:
+    def _upload_file_http(self, src_fn, force=False) -> str:
         name = os.path.basename(src_fn)
 
         with open(src_fn, "rb") as f:
-            fhash = _file_hash(f)
-            f.seek(0)
+            if force:
+                # Generate random hash
+                tag = uuid.uuid4().hex
+                logger.info(f"Pushing to random tag: {tag}")
+            else:
+                # Compute hash
+                tag = _file_hash(f)
+                f.seek(0)
 
-            remote_fn = self._get_remote_fn_by_hashh(fhash)
-
-            if remote_fn is not None:
-                logger.info(f"{src_fn} is already available remotely: {remote_fn}")
-                return remote_fn
+                remote_fn = self._get_remote_fn_by_hashh(tag)
+                if remote_fn is not None:
+                    logger.info(f"{src_fn} is already available remotely: {remote_fn}")
+                    return remote_fn
 
             logger.info(f"Uploading {src_fn} via HTTP...")
             total = os.fstat(f.fileno()).st_size
+
+            if total > 500 * 1024**2:
+                logger.warning(
+                    "File is larger than 500MiB, HTTP upload will most likely fail."
+                )
+
             with progress_meter(
                 f"file:{src_fn}",
                 unit="B",
@@ -823,12 +858,12 @@ class Remote(Obervable):
                 total=total,
             ) as pm:
                 me = requests_toolbelt.MultipartEncoder(
-                    {"file": (name, f), "path": src_fn, "tag": fhash}
+                    {"file": (name, f), "path": src_fn, "tag": tag}
                 )
                 mm = requests_toolbelt.MultipartEncoderMonitor(
                     me, lambda monitor: pm.set(monitor.bytes_read)
                 )
-                response = requests.post(
+                response = self._session.post(
                     urllib.parse.urljoin(self.config["api_endpoint"], f"my_files/"),
                     data=mm,
                     headers={**self.auth_headers, "Content-Type": mm.content_type},
@@ -836,7 +871,60 @@ class Remote(Obervable):
 
         self._check_response(response)
 
-        return response.text
+        filename = response.json()
+
+        assert isinstance(filename, str)
+
+        return filename
+
+    def _upload_file_ftp(self, src_fn, force=False) -> str:
+        name = os.path.basename(src_fn)
+
+        with open(src_fn, "rb") as f:
+            if force:
+                # Generate random hash
+                tag = uuid.uuid4().hex
+                logger.info(f"Pushing to random tag: {tag}")
+            else:
+                # Compute hash
+                logger.info(f"Computing hash for {name}...")
+                tag = _file_hash(f)
+                f.seek(0)
+
+                # remote_fn = self._get_remote_fn_by_hashh(tag)
+                # if remote_fn is not None:
+                #     logger.info(f"{src_fn} is already available remotely: {remote_fn}")
+                #     return remote_fn
+
+            logger.info(f"Uploading {src_fn} via FTP...")
+            total = os.fstat(f.fileno()).st_size
+
+            with ftplib.FTP(
+                self.config["ftp_host"],
+                self.config["ftp_user"],
+                self.config["ftp_passwd"],
+            ) as ftp, progress_meter(
+                f"file:{src_fn}",
+                unit="B",
+                unit_scale=True,
+                unit_binary=True,
+                total=total,
+            ) as pm:
+                ftp.cwd(self.config["ftp_datadir"])
+                ftp.mkd(tag)
+                ftp.cwd(tag)
+                ftp.storbinary(
+                    f"STOR {name}", f, callback=lambda block: pm.update(len(block))
+                )
+
+        filename = posixpath.join(
+            self.config["ftp_server_root"],
+            self.config["ftp_datadir"].lstrip("/"),
+            tag,
+            name,
+        )
+
+        return filename
 
     def _upload_file_share(self, src_fn):
         dst_dir = os.path.join(self.config["import_data_share"], "pyecotaxa")
@@ -850,13 +938,26 @@ class Remote(Obervable):
 
         return posixpath.join("FTP/Ecotaxa_Data_to_import/pyecotaxa", dst_fn)
 
-    def _push_file(self, src_fn: str, project_id: int):
-        print(f"Pushing {src_fn} to {project_id}...")
+    def _push_file(
+        self,
+        src_fn: str,
+        project_id: int,
+        force=False,
+        mode: ImportMode = ImportMode.CREATE,
+        transport: Transport = Transport.HTTP,
+    ):
+        logger.info(f"Pushing {src_fn} to {project_id}...")
 
-        if self.config["import_data_share"] is not None:
+        if transport == Transport.SHARE:
+            if self.config["import_data_share"] is None:
+                raise ValueError(f"import_data_share is not available")
             remote_fn = self._upload_file_share(src_fn)
+        elif transport == Transport.HTTP:
+            remote_fn = self._upload_file_http(src_fn, force=force)
+        elif transport == Transport.FTP:
+            remote_fn = self._upload_file_ftp(src_fn, force=force)
         else:
-            remote_fn = self._upload_file_http(src_fn)
+            raise ValueError(f"Unknown transport: {transport!r}")
 
         print(f"Remote filename is {remote_fn}.")
 
@@ -867,14 +968,16 @@ class Remote(Obervable):
         )
 
         if not jobs:
-            job = self._start_project_import(project_id, remote_fn)
+            job = self._start_project_import(project_id, remote_fn, mode)
         else:
             job = jobs[0]
 
         # Wait for job to be finished
         job = self._wait_job_progress(job, f"Importing to {project_id}...")
 
-        # TODO: Cleanup
+        # TODO: Cleanup of job (and files?)
+
+        # TODO: Update metadata of local file: {"push:{project_id}": {"hash": ...}}
 
     def _validate_meta(self, root: str, meta: Mapping[str, Mapping[str, Any]]):
         def validate():
@@ -896,6 +999,9 @@ class Remote(Obervable):
         self,
         file_fn_project_id: Sequence[Tuple[str, int]],
         n_parallel=1,
+        force=False,
+        mode: ImportMode = ImportMode.CREATE,
+        transport: Transport = Transport.HTTP,
     ):
         """
         Push a local checkout to EcoTaxa.
@@ -906,7 +1012,7 @@ class Remote(Obervable):
             mode: create / update / update_with_classification
         """
 
-        print(f"Pushing {len(file_fn_project_id)} files...")
+        logger.info(f"Pushing {len(file_fn_project_id)} files...")
 
         if n_parallel:
             executor = concurrent.futures.ThreadPoolExecutor(n_parallel)
@@ -915,8 +1021,7 @@ class Remote(Obervable):
 
         [
             self._push_file(
-                file_fn,
-                project_id,
+                file_fn, project_id, force=force, mode=mode, transport=transport
             )
             for file_fn, project_id in file_fn_project_id
         ]
