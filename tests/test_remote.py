@@ -5,6 +5,7 @@ import pytest
 from pyecotaxa.remote import Remote
 
 
+# Use --run-slow to include this test
 @pytest.mark.slow
 def test_pull(tmp_path):
     t = Remote()
