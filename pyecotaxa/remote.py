@@ -1,5 +1,6 @@
 import concurrent.futures
 import enum
+import functools
 import getpass
 import glob
 import hashlib
@@ -20,12 +21,13 @@ import urllib3.util.retry
 import requests.adapters
 import requests_toolbelt
 import semantic_version
-import tqdm
+from tqdm.auto import tqdm
 import werkzeug
 from atomicwrites import atomic_write as _atomic_write
 
 from pyecotaxa._config import (
     JsonConfig,
+    MultiConfig,
     check_config,
     default_config,
     find_file_recursive,
@@ -122,9 +124,11 @@ def copyfile_progress(src, dst, chunksize=1024**2):
                 nbytes = fsrc.readinto(buf)
                 if not nbytes:
                     break
-                fdst.write(buf[:nbytes])
+                fdst.write(buf)
 
-                pm.update(nbytes)
+                n_written += len(buf)
+
+                yield n_written, total
 
 
 class State(enum.Enum):
@@ -151,7 +155,7 @@ class ProgressListener:
         try:
             progress_bar = self.progress_bars[target]
         except KeyError:
-            progress_bar = self.progress_bars[target] = tqdm.tqdm(
+            progress_bar = self.progress_bars[target] = tqdm(
                 position=0 if target is None else None, unit_scale=True
             )
 
@@ -254,16 +258,19 @@ class Remote(Obervable):
     ):
         super().__init__()
 
-        user_config_fn = os.path.expanduser("~/.pyecotaxa.json")
-        local_config_fn = find_file_recursive(".pyecotaxa.json")
+        config = MultiConfig()
 
-        # Load config from files and environment
-        config = {
-            **default_config,
-            **JsonConfig(user_config_fn, verbose=verbose),
-            **JsonConfig(local_config_fn, verbose=verbose),
-            **load_env(verbose=verbose),
-        }
+        config.update_from(default_config, "<default>")
+
+        user_config_fn = os.path.expanduser("~/.pyecotaxa.json")
+        config.update_from(JsonConfig(user_config_fn, verbose=verbose), user_config_fn)
+
+        local_config_fn = find_file_recursive(".pyecotaxa.json")
+        config.update_from(
+            JsonConfig(local_config_fn, verbose=verbose), local_config_fn
+        )
+
+        config.update_from(load_env(verbose=verbose), "<environment>")
 
         if api_endpoint is not None:
             config["api_endpoint"] = api_endpoint
@@ -447,11 +454,11 @@ class Remote(Obervable):
             project_id, job_id, target_directory=target_directory
         )
 
-    def _start_project_export(self, project_id, *, with_images):
+    def _start_project_export(self, project_id, *, with_images, filters):
         response = requests.post(
             urllib.parse.urljoin(self.config["api_endpoint"], "object_set/export"),
             json={
-                "filters": {},
+                "filters": filters,
                 "request": {
                     "project_id": project_id,
                     "exp_type": "BAK",
@@ -638,6 +645,7 @@ class Remote(Obervable):
         check_integrity: bool,
         cleanup_task_data: bool,
         with_images: bool,
+        filters: Mapping,
     ) -> str:
         """Find and return the name of the local copy of the requested project."""
 
@@ -653,6 +661,7 @@ class Remote(Obervable):
                     project_id,
                     target_directory=target_directory,
                     with_images=with_images,
+                    filters=filters,
                 )
 
             print(f"Got {archive_fn}.")
@@ -704,6 +713,7 @@ class Remote(Obervable):
         check_integrity=True,
         cleanup_task_data=True,
         with_images=True,
+        filters: Optional[Mapping] = None,
     ) -> List[str]:
         """
         Export a project archive and transfer to a local directory.
@@ -720,6 +730,9 @@ class Remote(Obervable):
 
         if isinstance(project_ids, int):
             project_ids = [project_ids]
+
+        if filters is None:
+            filters = {}
 
         os.makedirs(target_directory, exist_ok=True)
 
@@ -740,6 +753,7 @@ class Remote(Obervable):
                 check_integrity=check_integrity,
                 cleanup_task_data=cleanup_task_data,
                 with_images=with_images,
+                filters=filters,
             )
             for project_id in project_ids
         ]
