@@ -15,15 +15,15 @@ import uuid
 import warnings
 import zipfile
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
-import ftplib
+
 import requests
-import urllib3.util.retry
 import requests.adapters
 import requests_toolbelt
 import semantic_version
-from tqdm.auto import tqdm
+import urllib3.util.retry
 import werkzeug
 from atomicwrites import atomic_write as _atomic_write
+from tqdm.auto import tqdm
 
 from pyecotaxa._config import (
     JsonConfig,
@@ -272,6 +272,8 @@ class Remote(Obervable):
 
         config.update_from(load_env(verbose=verbose), "<environment>")
 
+        # Update config from parameters
+        # TODO: Use `set`
         if api_endpoint is not None:
             config["api_endpoint"] = api_endpoint
 
