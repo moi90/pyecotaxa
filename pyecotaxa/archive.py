@@ -6,7 +6,7 @@ import pathlib
 import tarfile
 import warnings
 import zipfile
-from typing import IO, Callable, List, Union
+from typing import IO, Callable, List, Mapping, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,7 @@ import pandas as pd
 __all__ = ["read_tsv", "write_tsv"]
 
 
-def _fix_types(dataframe, enforce_types):
+def _fix_types(dataframe: pd.DataFrame, enforce_types):
     header = dataframe.columns.get_level_values(0)
     types = dataframe.columns.get_level_values(1)
 
@@ -35,13 +35,17 @@ def _fix_types(dataframe, enforce_types):
             # Clean up empty fields
             types = [None if t.startswith("Unnamed") else t for t in types]
 
-            # Prepend the current "types" to the dataframe
-            row0 = pd.DataFrame([types], columns=header).astype(dataframe.dtypes)
+            # Parse and prepend the current "types" to the dataframe
+            row0_str = pd.DataFrame([types], columns=header).to_csv(index=False)
+            row0 = pd.read_csv(
+                io.StringIO(row0_str),
+                index_col=False,
+                # Use dt.name, because pd.Int64Dtype does not work here directly
+                dtype={c: dt.name for c, dt in dataframe.dtypes.items()},
+            )
 
             if enforce_types:
-                warnings.warn(
-                    "enforce_types=True, but no type header was found.", stacklevel=3
-                )
+                raise ValueError("enforce_types=True, but no type header was found.")
 
             return pd.concat((row0, dataframe), ignore_index=True)
 
@@ -49,6 +53,11 @@ def _fix_types(dataframe, enforce_types):
         # Enforce [f] types
         dataframe[float_cols] = dataframe[float_cols].astype(float)
         dataframe[text_cols] = dataframe[text_cols].fillna("").astype(str)
+    else:
+        # Replace NaN with empty string in string columns
+        for c in dataframe.columns:
+            if pd.api.types.is_string_dtype(dataframe.dtypes[c]):
+                dataframe[c] = dataframe[c].fillna("")
 
     return dataframe
 
@@ -64,11 +73,34 @@ def _apply_usecols(
     return df[columns]
 
 
+DEFAULT_DTYPES = {
+    "img_file_name": str,
+    "img_rank": int,
+    "object_id": str,
+    "object_link": str,
+    "object_lat": float,
+    "object_lon": float,
+    "object_date": str,
+    "object_time": str,
+    "object_annotation_date": str,
+    "object_annotation_time": str,
+    "object_annotation_category": str,
+    "object_annotation_category_id": "Int64",
+    "object_annotation_person_name": str,
+    "object_annotation_person_email": str,
+    "object_annotation_status": str,
+    "process_id": str,
+    "acq_id": str,
+    "sample_id": str,
+}
+
+
 def read_tsv(
     filepath_or_buffer,
     encoding: str = "utf-8-sig",
     enforce_types=False,
     usecols: Union[None, Callable, List[str]] = None,
+    dtype=None,
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -79,13 +111,24 @@ def read_tsv(
         encoding: Encoding of the TSV file.
             With the default "utf-8-sig", both UTF8 and signed UTF8 can be read.
         enforce_types: Enforce the column dtypes provided in the header.
-            Usually, it is desirable to allow pandas to infer the column dtypes.
+            Usually, it is desirable to use the default dtypes and allow pandas to infer the column dtypes.
         usecols: List of strings or callable.
         **kwargs: Additional kwargs are passed to :func:`pandas:pandas.read_csv`.
 
     Returns:
         A Pandas :class:`~pandas:pandas.DataFrame`.
     """
+
+    if enforce_types:
+        dtype = str
+    else:
+        if dtype is None:
+            dtype = DEFAULT_DTYPES
+        elif isinstance(dtype, Mapping):
+            dtype = {**DEFAULT_DTYPES, **dtype}
+        else:
+            # One dtype for all columns
+            pass
 
     if usecols is not None:
         chunksize = kwargs.pop("chunksize", 10000)
@@ -100,6 +143,7 @@ def read_tsv(
                     encoding=encoding,
                     header=[0, 1],
                     chunksize=chunksize,
+                    dtype=dtype,
                     **kwargs,
                 )
             ]
@@ -109,14 +153,19 @@ def read_tsv(
             warnings.warn("Parameter chunksize is ignored.")
 
         dataframe: pd.DataFrame = pd.read_csv(
-            filepath_or_buffer, sep="\t", encoding=encoding, header=[0, 1], **kwargs
+            filepath_or_buffer,
+            sep="\t",
+            encoding=encoding,
+            header=[0, 1],
+            dtype=dtype,
+            **kwargs,
         )  # type: ignore
 
     return _fix_types(dataframe, enforce_types)
 
 
 def _dtype_to_ecotaxa(dtype):
-    if np.issubdtype(dtype, np.number):
+    if pd.api.types.is_numeric_dtype(dtype):
         return "[f]"
 
     return "[t]"
@@ -127,6 +176,7 @@ def write_tsv(
     path_or_buf=None,
     encoding="utf-8",
     type_header=True,
+    formatters: Optional[Mapping] = None,
     **kwargs,
 ):
     """
@@ -148,14 +198,27 @@ def write_tsv(
             If path_or_buf is None, returns the resulting csv format as a string. Otherwise returns None.
     """
 
-    if type_header:
-        # Make a copy before changing the index
-        dataframe = dataframe.copy()
+    if formatters is None:
+        formatters = {}
 
+    dataframe = dataframe.copy(deep=False)
+
+    # Calculate type header before formatting values
+    ecotaxa_types = [_dtype_to_ecotaxa(dt) for dt in dataframe.dtypes]
+
+    # Apply formatting
+    for col in dataframe.columns:
+        fmt = formatters.get(col)
+
+        if fmt is None:
+            continue
+
+        dataframe[col] = dataframe[col].apply(fmt)
+
+    if type_header:
         # Inject types into header
-        type_header = [_dtype_to_ecotaxa(dt) for dt in dataframe.dtypes]
         dataframe.columns = pd.MultiIndex.from_tuples(
-            list(zip(dataframe.columns, type_header))
+            list(zip(dataframe.columns, ecotaxa_types))
         )
 
     return dataframe.to_csv(
