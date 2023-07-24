@@ -18,7 +18,7 @@ setup(
     packages=find_packages(),
     include_package_data=True,
     install_requires=[
-        "pandas",
+        "pandas>=1.2",
         "numpy",
         "python-dotenv",
         "requests",
