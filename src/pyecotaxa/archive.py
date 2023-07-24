@@ -104,6 +104,7 @@ def _parse_tsv_header(
 def read_tsv(
     fn_or_f: Union[str, pathlib.Path, IOBase],
     encoding: str = "utf-8-sig",
+    enforce_types=False,
     dtype=None,
     **kwargs,
 ):
@@ -124,6 +125,8 @@ def read_tsv(
             The file path or file-like object to read the TSV from.
         encoding (str, optional):
             The encoding to use for reading the file. Defaults to "utf-8-sig".
+        enforce_types (bool, optional):
+            Require an explicit EcoTaxa type header. Raises ValueError when missing.
         dtype (dict, optional):
             A dictionary specifying the data types of columns. Defaults to `None`,
             which uses the default types.
@@ -167,6 +170,9 @@ def read_tsv(
             # Peek the first 8kb and inspect
             header_f = BytesIO(f.peek(8 * 1024))  # type: ignore
             names, header_dtype, skiprows = _parse_tsv_header(header_f, encoding)
+
+        if enforce_types and not header_dtype:
+            raise ValueError("enforce_types=True, but no type header was found.")
 
         dtype = {**header_dtype, **dtype}
 

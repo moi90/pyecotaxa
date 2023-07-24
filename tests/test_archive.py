@@ -1,3 +1,4 @@
+import contextlib
 import io
 import pathlib
 import tarfile
@@ -12,14 +13,21 @@ from pandas.testing import assert_frame_equal, assert_series_equal
 from pyecotaxa.archive import Archive, MemberNotFoundError, read_tsv, write_tsv
 
 
+@pytest.mark.parametrize("enforce_types", [True, False])
 @pytest.mark.parametrize("type_header", [True, False])
-def test_read_tsv(type_header):
+def test_read_tsv(enforce_types, type_header):
     if type_header:
         file_content = "a\tb\tc\td\n[t]\t[f]\t[t]\t[t]\n1\t2.0\ta\t\n3\t4.0\tb\t"
     else:
         file_content = "a\tb\tc\td\n1\t2.0\ta\t\n3\t4.0\tb\t"
 
-    dataframe = read_tsv(StringIO(file_content))
+    if enforce_types and not type_header:
+        with pytest.raises(ValueError):
+            dataframe = read_tsv(StringIO(file_content), enforce_types=enforce_types)
+        return
+
+    dataframe = read_tsv(StringIO(file_content), enforce_types=enforce_types)
+
     assert len(dataframe) == 2
 
     assert list(dataframe.columns) == ["a", "b", "c", "d"]
@@ -34,16 +42,25 @@ def test_read_tsv(type_header):
         )
 
 
+@pytest.mark.parametrize("enforce_types", [True, False])
 @pytest.mark.parametrize("type_header", [True, False])
-def test_read_tsv_usecols(type_header):
+def test_read_tsv_usecols(enforce_types, type_header):
     if type_header:
         file_content = "a\tb\tc\td\n[t]\t[f]\t[t]\t[t]\n1\t2.0\ta\t\n3\t4.0\tb\t"
     else:
         file_content = "a\tb\tc\td\n1\t2.0\ta\t\n3\t4.0\tb\t"
 
+    if enforce_types and not type_header:
+        with pytest.raises(ValueError):
+            dataframe = read_tsv(
+                StringIO(file_content), enforce_types=enforce_types, usecols=("a", "b")
+            )
+        return
+
     dataframe = read_tsv(
-        StringIO(file_content), usecols=("a", "b")
+        StringIO(file_content), enforce_types=enforce_types, usecols=("a", "b")
     )
+
     assert len(dataframe) == 2
 
     assert list(dataframe.columns) == ["a", "b"]
@@ -90,7 +107,7 @@ def test_write_tsv(type_header):
 def test_empty_str_column():
     file_content = "a\tb\tc\n[t]\t[f]\t[t]\n\t2.0\ta"
 
-    dataframe = read_tsv(StringIO(file_content))
+    dataframe = read_tsv(StringIO(file_content), enforce_types=True)
     assert len(dataframe) == 1
 
     assert [dt.kind for dt in dataframe.dtypes] == ["O", "f", "O"]
