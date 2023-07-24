@@ -16,7 +16,9 @@ import pyecotaxa
 import pyecotaxa.taxonomy
 from pyecotaxa._config import JsonConfig, find_file_recursive
 from pyecotaxa.archive import read_tsv, write_tsv
-from pyecotaxa.remote import Remote
+from pyecotaxa.meta import FileMeta
+from pyecotaxa.remote import ProgressListener, Remote, Transport
+import logging
 
 warnings.simplefilter("error", pd.errors.DtypeWarning)
 
@@ -27,6 +29,8 @@ def cli():  # pragma: no cover
     """
     Command line client for pyecotaxa.
     """
+
+    logging.getLogger().setLevel(logging.INFO)
 
 
 @cli.command()
@@ -71,10 +75,10 @@ def login(chdir, destination, verbose):
     username = input("Username: ")
     password = getpass.getpass()
 
-    transfer = Remote()
+    remote = Remote()
 
     try:
-        transfer.login(username, password)
+        api_token = remote.login(username, password)
     except requests.exceptions.HTTPError as exc:
         response: Optional[requests.Response] = exc.response
         if response is not None and response.status_code == 403:
@@ -83,7 +87,11 @@ def login(chdir, destination, verbose):
 
         raise
 
-    JsonConfig(config_fn).update(api_token=transfer.config["api_token"]).save()
+    email = remote.current_user()["email"]
+
+    print(f"Logged in successfully as {email}.")
+
+    JsonConfig(config_fn).update(api_token=api_token).save()
 
 
 @cli.command()
@@ -115,8 +123,81 @@ def pull(project_ids, with_images, chdir):
     if chdir:
         os.chdir(chdir)
 
+    progress_listener = ProgressListener()
+
     transfer = Remote()
+    transfer.register_observer(progress_listener.update)
     transfer.pull(project_ids, with_images=with_images)
+
+
+@cli.command()
+@click.argument("file_fns", nargs=-1, type=str)
+@click.option("--to", "project_id", type=int)
+@click.option(
+    "--chdir",
+    "-C",
+    metavar="PATH",
+    help="Run as if started in PATH instead of the current working directory.",
+)
+@click.option(
+    "-f",
+    "--force",
+    is_flag=True,
+    help="Force upload even if present",
+)
+@click.option(
+    "--http",
+    "transport",
+    flag_value="http",
+    help="Use HTTP for data transfer",
+)
+@click.option(
+    "--ftp",
+    "transport",
+    flag_value="ftp",
+    help="Use FTP for data transfer",
+)
+@click.option(
+    "--share",
+    "transport",
+    flag_value="share",
+    help="Use file share for data transfer",
+)
+def push(file_fns, project_id, chdir, force, transport):
+    """
+    Push archives to the EcoTaxa server.
+
+    The files are uploaded and an import job is triggered on the server.
+    """
+
+    # Change to specified directory
+    if chdir:
+        os.chdir(chdir)
+
+    # Prepare import job
+    if project_id is None:
+        file_fn_project_id = [
+            (file_fn, FileMeta(file_fn + FileMeta.SUFFIX)["project_id"])
+            for file_fn in file_fns
+        ]
+    else:
+        file_fn_project_id = [(file_fn, project_id) for file_fn in file_fns]
+
+    remote = Remote()
+
+    if transport is None:
+        transport = (
+            Transport.SHARE
+            if remote.config["import_data_share"] is not None
+            else Transport.HTTP
+        )
+    else:
+        transport = Transport(transport)
+
+    logging.info("Logged in as %s", remote.current_user()["email"])
+    logging.info(f"Transport: {transport}")
+
+    remote.push(file_fn_project_id, force=force, transport=transport)
 
 
 def _table_reader_writer(fn) -> Tuple[Callable, Callable]:

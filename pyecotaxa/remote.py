@@ -2,18 +2,23 @@ import concurrent.futures
 import enum
 import getpass
 import glob
+import hashlib
+import logging
 import os
+import posixpath
 import shutil
 import time
 import traceback
 import urllib.parse
+import uuid
 import warnings
 import zipfile
-from typing import Any, Dict, List, Mapping, Optional, Union
-import posixpath
-
-from pyecotaxa.status import progress_meter
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+import ftplib
 import requests
+import urllib3.util.retry
+import requests.adapters
+import requests_toolbelt
 import semantic_version
 import tqdm
 import werkzeug
@@ -26,8 +31,22 @@ from pyecotaxa._config import (
     find_file_recursive,
     load_env,
 )
+from pyecotaxa.status import progress_meter
+
+logger = logging.getLogger(__name__)
 
 
+class ImportMode(enum.Enum):
+    # Yes = Update metadata only. Cla = Also update classifications. Else create.
+    CREATE = "No"
+    UPDATE = "Yes"
+    UPDATE_ANNOTATE = "Cla"
+
+
+class Transport(enum.Enum):
+    SHARE = "share"
+    HTTP = "http"
+    FTP = "ftp"
 
 
 class DummyExecutor(concurrent.futures.Executor):
@@ -180,6 +199,32 @@ class Obervable:
             fn(*args, **kwargs)
 
 
+def _value_matches_query(value, query) -> bool:
+    if isinstance(value, Mapping) and isinstance(query, Mapping):
+        _none = object()
+        return all(
+            _value_matches_query(value.get(k, _none), qv) for k, qv in query.items()
+        )
+
+    if isinstance(value, Sequence) and isinstance(query, Sequence):
+        if len(value) != len(query):
+            return False
+        return all(_value_matches_query(v, qv) for v, qv in zip(value, query))
+
+    if value == query:
+        return True
+
+    return False
+
+
+def _file_hash(f) -> str:
+    fhash = hashlib.sha256()
+    for chunk in iter(lambda: f.read(4096), b""):
+        fhash.update(chunk)
+
+    return fhash.hexdigest()
+
+
 class Remote(Obervable):
     """
     Interact with a remote EcoTaxa server.
@@ -204,6 +249,7 @@ class Remote(Obervable):
         api_endpoint: Optional[str] = None,
         api_token: Optional[str] = None,
         exported_data_share: Union[None, str, bool] = None,
+        import_data_share: Union[None, str, bool] = None,
         verbose=False,
     ):
         super().__init__()
@@ -221,7 +267,6 @@ class Remote(Obervable):
 
         if api_endpoint is not None:
             config["api_endpoint"] = api_endpoint
-        
 
         if api_token is not None:
             config["api_token"] = api_token
@@ -229,9 +274,19 @@ class Remote(Obervable):
         if exported_data_share is not None:
             config["exported_data_share"] = exported_data_share
 
+        if import_data_share is not None:
+            config["import_data_share"] = import_data_share
+
         self.config = check_config(config)
 
         self._check_version()
+
+        # TODO: Use session everywhere
+        self._session = requests.Session()
+        retry = urllib3.util.retry.Retry(connect=3, backoff_factor=0.5)
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
 
     def _check_version(self):
         response = requests.get(
@@ -244,7 +299,7 @@ class Remote(Obervable):
 
         version = openapi_schema.get("info", {}).get("version", "0.0.0")
 
-        self._notify_observers(None, message=f"Server OpenAPI version is {version}")
+        logger.info(f"Server OpenAPI version is {version}")
 
         if semantic_version.Version(version) not in semantic_version.SimpleSpec(
             self.REQUIRED_OPENAPI_VERSION
@@ -264,15 +319,9 @@ class Remote(Obervable):
 
         self._check_response(response)
 
-        self.api_token = response.json()
+        self.config["api_token"] = api_token = response.json()
 
-        self._notify_observers(None, message="Logged in successfully.")
-
-    def login_interactive(self):
-        username = input("Username: ")
-        password = getpass.getpass()
-
-        self.login(username, password)
+        return api_token
 
     @property
     def auth_headers(self):
@@ -438,7 +487,7 @@ class Remote(Obervable):
         # Get job data
         return self._get_job(job_id)
 
-    def _get_jobs(self):
+    def _get_jobs(self, type=None, params=None):
         response = requests.get(
             urllib.parse.urljoin(self.config["api_endpoint"], "jobs"),
             params={"for_admin": False},
@@ -447,7 +496,19 @@ class Remote(Obervable):
 
         self._check_response(response)
 
-        return response.json()
+        jobs = response.json()
+
+        if type is not None:
+            jobs = [job for job in jobs if job.get("type") == type]
+
+        if params is not None:
+            jobs = [
+                job
+                for job in jobs
+                if _value_matches_query(job.get("params", {}), params)
+            ]
+
+        return jobs
 
     def _wait_job_progress(self, job, task_descr: str):
         """
@@ -621,9 +682,8 @@ class Remote(Obervable):
         try:
             response.raise_for_status()
         except:
-            self._notify_observers(
-                None,
-                message="\n".join(
+            logger.error(
+                "\n".join(
                     [
                         "Request failed!",
                         f"Request url: {response.request.method} {response.request.url}",
@@ -631,7 +691,7 @@ class Remote(Obervable):
                         f"Response headers: {response.headers}",
                         f"Response text: {response.text}",
                     ]
-                ),
+                )
             )
             raise
 
@@ -663,7 +723,7 @@ class Remote(Obervable):
 
         os.makedirs(target_directory, exist_ok=True)
 
-        if n_parallel:
+        if n_parallel > 1:
             executor = concurrent.futures.ThreadPoolExecutor(n_parallel)
         else:
             executor = DummyExecutor()
@@ -710,15 +770,18 @@ class Remote(Obervable):
 
         return response.json()
 
-    def _start_project_import(self, project_id, source_path):
+    def _start_project_import(self, project_id, source_path, mode: ImportMode):
+        logger.info("Starting project import...")
         response = requests.post(
-            urllib.parse.urljoin(self.api_endpoint, f"file_import/{project_id}"),
+            urllib.parse.urljoin(
+                self.config["api_endpoint"], f"file_import/{project_id}"
+            ),
             json={
                 "source_path": source_path,
                 "taxo_mappings": {},
                 "skip_loaded_files": False,
-                "skip_existing_objects": True,  # Has to be True for an update.
-                "update_mode": "Cla",  # Yes = Update metadata only. Cla = Also update classifications.
+                "skip_existing_objects": True,  # Has to be True for an update (so that updateable objects are calculated)
+                "update_mode": mode.value,
             },
             headers=self.auth_headers,
         )
@@ -732,40 +795,189 @@ class Remote(Obervable):
         # Get job data
         return self._get_job(job_id)
 
-    def _push_file(self, file_fn: str, project_id: int, *, source_directory):
-        print(f"Pushing {file_fn} to {project_id}...")
+    def _get_remote_fn_by_hashh(self, fhash):
+        # Currently, the /my_files endpoint is broken
+        # See https://github.com/ecotaxa/ecotaxa_back/issues/56
+        # TODO: source_path = "/tmp/ecotaxa_user.{CREATOR_USER_ID}/{TAG}/{DEST_FILE_NAME}"
+        return None
 
-        assert self.config["import_data_share"] is not None
+        response = requests.get(
+            urllib.parse.urljoin(self.config["api_endpoint"], f"my_files/{fhash}"),
+            headers=self.auth_headers,
+        )
 
+        if response.status_code == 404:
+            return None
+
+        self._check_response(response)
+
+        # {'path': 'deadbeef...', 'entries': [{'name': 'archive.zip', 'type': 'F', 'size': 0, 'mtime': '2023-02-16 19:06:50.901954'}]}
+        data = response.json()
+
+        if "entries" not in data or "path" not in data:
+            return None
+
+        try:
+            (entry,) = data["entries"]
+        except ValueError:
+            return None
+
+        return posixpath.join(data["path"], entry["name"])
+
+    def _upload_file_http(self, src_fn, force=False) -> str:
+        name = os.path.basename(src_fn)
+
+        with open(src_fn, "rb") as f:
+            if force:
+                # Generate random hash
+                tag = uuid.uuid4().hex
+                logger.info(f"Pushing to random tag: {tag}")
+            else:
+                # Compute hash
+                tag = _file_hash(f)
+                f.seek(0)
+
+                remote_fn = self._get_remote_fn_by_hashh(tag)
+                if remote_fn is not None:
+                    logger.info(f"{src_fn} is already available remotely: {remote_fn}")
+                    return remote_fn
+
+            logger.info(f"Uploading {src_fn} via HTTP...")
+            total = os.fstat(f.fileno()).st_size
+
+            if total > 500 * 1024**2:
+                logger.warning(
+                    "File is larger than 500MiB, HTTP upload will most likely fail."
+                )
+
+            with progress_meter(
+                f"file:{src_fn}",
+                unit="B",
+                unit_scale=True,
+                unit_binary=True,
+                total=total,
+            ) as pm:
+                me = requests_toolbelt.MultipartEncoder(
+                    {"file": (name, f), "path": src_fn, "tag": tag}
+                )
+                mm = requests_toolbelt.MultipartEncoderMonitor(
+                    me, lambda monitor: pm.set(monitor.bytes_read)
+                )
+                response = self._session.post(
+                    urllib.parse.urljoin(self.config["api_endpoint"], f"my_files/"),
+                    data=mm,
+                    headers={**self.auth_headers, "Content-Type": mm.content_type},
+                )
+
+        self._check_response(response)
+
+        filename = response.json()
+
+        assert isinstance(filename, str)
+
+        return filename
+
+    def _upload_file_ftp(self, src_fn, force=False) -> str:
+        name = os.path.basename(src_fn)
+
+        with open(src_fn, "rb") as f:
+            if force:
+                # Generate random hash
+                tag = uuid.uuid4().hex
+                logger.info(f"Pushing to random tag: {tag}")
+            else:
+                # Compute hash
+                logger.info(f"Computing hash for {name}...")
+                tag = _file_hash(f)
+                f.seek(0)
+
+                # remote_fn = self._get_remote_fn_by_hashh(tag)
+                # if remote_fn is not None:
+                #     logger.info(f"{src_fn} is already available remotely: {remote_fn}")
+                #     return remote_fn
+
+            logger.info(f"Uploading {src_fn} via FTP...")
+            total = os.fstat(f.fileno()).st_size
+
+            with ftplib.FTP(
+                self.config["ftp_host"],
+                self.config["ftp_user"],
+                self.config["ftp_passwd"],
+            ) as ftp, progress_meter(
+                f"file:{src_fn}",
+                unit="B",
+                unit_scale=True,
+                unit_binary=True,
+                total=total,
+            ) as pm:
+                ftp.cwd(self.config["ftp_datadir"])
+                ftp.mkd(tag)
+                ftp.cwd(tag)
+                ftp.storbinary(
+                    f"STOR {name}", f, callback=lambda block: pm.update(len(block))
+                )
+
+        filename = posixpath.join(
+            self.config["ftp_server_root"],
+            self.config["ftp_datadir"].lstrip("/"),
+            tag,
+            name,
+        )
+
+        return filename
+
+    def _upload_file_share(self, src_fn):
         dst_dir = os.path.join(self.config["import_data_share"], "pyecotaxa")
         os.makedirs(dst_dir, exist_ok=True)
 
         # Copy file into the import directory
-        src_fn = os.path.join(source_directory, file_fn)
-        dst_fn = os.path.join(dst_dir, file_fn)
+        dst_fn = os.path.join(dst_dir, os.path.basename(src_fn))
         if not os.path.isfile(dst_fn):
             copyfile_progress(src_fn, dst_fn)
             shutil.copymode(src_fn, dst_fn)
 
-        remote_fn = posixpath.join("FTP/Ecotaxa_Data_to_import/pyecotaxa", file_fn)
+        return posixpath.join("FTP/Ecotaxa_Data_to_import/pyecotaxa", dst_fn)
+
+    def _push_file(
+        self,
+        src_fn: str,
+        project_id: int,
+        force=False,
+        mode: ImportMode = ImportMode.CREATE,
+        transport: Transport = Transport.HTTP,
+    ):
+        logger.info(f"Pushing {src_fn} to {project_id}...")
+
+        if transport == Transport.SHARE:
+            if self.config["import_data_share"] is None:
+                raise ValueError(f"import_data_share is not available")
+            remote_fn = self._upload_file_share(src_fn)
+        elif transport == Transport.HTTP:
+            remote_fn = self._upload_file_http(src_fn, force=force)
+        elif transport == Transport.FTP:
+            remote_fn = self._upload_file_ftp(src_fn, force=force)
+        else:
+            raise ValueError(f"Unknown transport: {transport!r}")
+
+        print(f"Remote filename is {remote_fn}.")
 
         # Find running or finished import task for project_id
-        matches = [
-            job
-            for job in self._get_jobs()
-            if job.get("type") == "FileImport"
-            and job.get("params", {}).get("req", {}).get("project_id") == project_id
-        ]
+        jobs = self._get_jobs(
+            type="FileImport",
+            params={"req": {"project_id": project_id, "source_path": remote_fn}},
+        )
 
-        if not matches:
-            job = self._start_project_import(project_id, remote_fn)
+        if not jobs:
+            job = self._start_project_import(project_id, remote_fn, mode)
         else:
-            job = matches[0]
+            job = jobs[0]
 
         # Wait for job to be finished
         job = self._wait_job_progress(job, f"Importing to {project_id}...")
 
-        # TODO: Cleanup
+        # TODO: Cleanup of job (and files?)
+
+        # TODO: Update metadata of local file: {"push:{project_id}": {"hash": ...}}
 
     def _validate_meta(self, root: str, meta: Mapping[str, Mapping[str, Any]]):
         def validate():
@@ -785,11 +997,11 @@ class Remote(Obervable):
 
     def push(
         self,
-        *,
-        source_directory=".",
-        meta=None,
-        project_ids=None,
+        file_fn_project_id: Sequence[Tuple[str, int]],
         n_parallel=1,
+        force=False,
+        mode: ImportMode = ImportMode.CREATE,
+        transport: Transport = Transport.HTTP,
     ):
         """
         Push a local checkout to EcoTaxa.
@@ -800,49 +1012,36 @@ class Remote(Obervable):
             mode: create / update / update_with_classification
         """
 
-        if meta is None:
-            meta = {}
-
-        for abs_meta_fn in glob.glob(
-            os.path.join(source_directory, "*" + FileMeta.SUFFIX)
-        ):
-            meta_fn = os.path.relpath(abs_meta_fn, source_directory)
-            file_fn = removesuffix(meta_fn, FileMeta.SUFFIX)
-
-            meta[file_fn] = FileMeta(abs_meta_fn).update(meta.get(file_fn, {}))
-
-        # Filter for existing files
-        meta = self._validate_meta(source_directory, meta)
-
-        # Filter project ids
-        if project_ids is not None:
-            meta = {
-                file_fn: file_meta
-                for file_fn, file_meta in meta.items()
-                if file_meta["project_id"] in project_ids
-            }
-
-        print(f"Pushing {len(meta)} archives...")
+        logger.info(f"Pushing {len(file_fn_project_id)} files...")
 
         if n_parallel:
             executor = concurrent.futures.ThreadPoolExecutor(n_parallel)
         else:
             executor = DummyExecutor()
 
-        futures = [
-            executor.submit(
-                self._push_file,
-                file_fn,
-                file_meta["project_id"],
-                source_directory=source_directory,
+        [
+            self._push_file(
+                file_fn, project_id, force=force, mode=mode, transport=transport
             )
-            for file_fn, file_meta in meta.items()
+            for file_fn, project_id in file_fn_project_id
         ]
 
-        with progress_meter(
-            "total", unit="B", unit_scale=True, unit_binary=True, total=len(futures)
-        ) as pm:
-            for fut in concurrent.futures.as_completed(futures):
-                fut.result()
-                pm.update()
-	
+        # futures = [
+        #     executor.submit(
+        #         self._push_file,
+        #         file_fn,
+        #         project_id,
+        #     )
+        #     for file_fn, project_id in file_fn_project_id
+        # ]
+
+        # try:
+        #     with progress_meter(
+        #         "total", unit="B", unit_scale=True, unit_binary=True, total=len(futures)
+        #     ) as pm:
+        #         for fut in concurrent.futures.as_completed(futures):
+        #             fut.result()
+        #             pm.update()
+
+        # finally:
+        #     executor.shutdown()

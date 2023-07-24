@@ -146,5 +146,11 @@ def check_config(config):
 default_config = {
     "api_endpoint": "https://ecotaxa.obs-vlfr.fr/api/",
     "exported_data_share": None,
+    "import_data_share": None,
     "api_token": None,
+    "ftp_host": "plankton.obs-vlfr.fr",
+    "ftp_user": "",
+    "ftp_passwd": "",
+    "ftp_datadir": "/Ecotaxa_Data_to_import/pyecotaxa",
+    "ftp_server_root": "FTP",
 }
