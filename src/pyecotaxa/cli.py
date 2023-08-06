@@ -17,7 +17,7 @@ import pyecotaxa.taxonomy
 from pyecotaxa._config import JsonConfig, find_file_recursive
 from pyecotaxa.archive import read_tsv, write_tsv
 from pyecotaxa.meta import FileMeta
-from pyecotaxa.remote import ProgressListener, Remote, Transport
+from pyecotaxa.remote import ImportMode, ProgressListener, Remote, Transport
 import logging
 
 warnings.simplefilter("error", pd.errors.DtypeWarning)
@@ -163,7 +163,26 @@ def pull(project_ids, with_images, chdir):
     flag_value="share",
     help="Use file share for data transfer",
 )
-def push(file_fns, project_id, chdir, force, transport):
+@click.option(
+    "--update-meta",
+    "mode",
+    flag_value="UPDATE_META",
+    help="Only update metadata (no creation of objects)",
+)
+@click.option(
+    "--update-anno",
+    "mode",
+    flag_value="UPDATE_ANNO",
+    help="Update metadata and annotations (no creation of objects)",
+)
+@click.option(
+    "--create",
+    "mode",
+    flag_value="CREATE",
+    help="Only create objects",
+    default=True,
+)
+def push(file_fns, project_id, chdir, force, transport, mode):
     """
     Push archives to the EcoTaxa server.
 
@@ -194,10 +213,12 @@ def push(file_fns, project_id, chdir, force, transport):
     else:
         transport = Transport(transport)
 
+    mode = getattr(ImportMode, mode)
+
     logging.info("Logged in as %s", remote.current_user()["email"])
     logging.info(f"Transport: {transport}")
 
-    remote.push(file_fn_project_id, force=force, transport=transport)
+    remote.push(file_fn_project_id, force=force, transport=transport, mode=mode)
 
 
 def _table_reader_writer(fn) -> Tuple[Callable, Callable]:
@@ -412,7 +433,19 @@ def gen_annotation_update(
     else:
         src_on = dst_on = match_on
 
-    src_data = _read_all_meta(src_fn)
+    try:
+        src_data = _read_all_meta(src_fn)
+    except FileNotFoundError:
+        _abort(f"File '{src_fn}' not found. Aborting.")
+
+    # Keep only annotation-related data from src and rename
+    src_data = src_data[
+        src_data.columns[
+            src_data.columns.str.startswith("object_annotation_")
+            | (src_data.columns == "object_id")
+            | (src_data.columns.isin(include_columns.keys()))
+        ]
+    ].rename(columns=include_columns)
 
     # Update annotation metadata
     if annotation_status is not None:
@@ -436,7 +469,7 @@ def gen_annotation_update(
 
     if "object_annotation_category" not in src_data.columns:
         _abort(
-            f"Column 'object_annotation_category' missing in {src_fn}!",
+            f"Column 'object_annotation_category' missing in {src_fn}.  Aborting.",
         )
 
     if not include_empty:
@@ -447,16 +480,7 @@ def gen_annotation_update(
         return
 
     if src_on not in src_data.columns:
-        _abort(f"No {src_on} column in {src_fn}")
-
-    # Keep only annotation-related data from src
-    src_data = src_data[
-        src_data.columns[
-            src_data.columns.str.startswith("object_annotation_")
-            | (src_data.columns == "object_id")
-            | (src_data.columns.isin(include_columns.keys()))
-        ]
-    ].rename(columns=include_columns)
+        _abort(f"No {src_on} column in {src_fn}. Aborting.")
 
     for base_fn in base_fns:
         print(f"Processing {base_fn}...")
@@ -475,7 +499,8 @@ def gen_annotation_update(
             # Restrict to unvalidated data
             if "object_annotation_status" not in base_data.columns:
                 _abort(
-                    f"Column 'object_annotation_status' missing in {base_fn}!",
+                    f"Column 'object_annotation_status' missing in {base_fn}! Aborting.\n"
+                    "Supply `--overwrite-validated` to update annotations regardless of previous status.",
                 )
 
             mask = base_data["object_annotation_status"] != "validated"
@@ -512,7 +537,8 @@ def gen_annotation_update(
 
         if "object_annotation_status" not in out_data.columns:
             _abort(
-                f"Column 'object_annotation_status' missing in {base_fn}!",
+                f"Column 'object_annotation_status' missing in result! Aborting.\n"
+                "Supply `--annotation-status validated` to mark all updated objects as validated.",
             )
 
         write_tsv(out_data, out_fn)
