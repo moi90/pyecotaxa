@@ -3,7 +3,6 @@ import enum
 import fnmatch
 import ftplib
 import functools
-import ftplib
 import glob
 import hashlib
 import logging
@@ -29,6 +28,7 @@ from tqdm.auto import tqdm
 
 from pyecotaxa.meta import FileMeta
 from pyecotaxa._config import (
+    DEFAULT_ECOTAXA_EXPORTED_DATA_SHARE,
     JsonConfig,
     MultiConfig,
     check_config,
@@ -36,9 +36,6 @@ from pyecotaxa._config import (
     find_file_recursive,
     load_env,
 )
-from pyecotaxa.meta import FileMeta
-from tqdm.auto import tqdm
-
 from .archive import Archive
 
 logger = logging.getLogger(__name__)
@@ -294,8 +291,8 @@ class Remote(Obervable):
             config["api_token"] = api_token
 
         if exported_data_share is True:
-            if os.path.isdir(DEFAULT_EXPORTED_DATA_SHARE):
-                exported_data_share = DEFAULT_EXPORTED_DATA_SHARE
+            if os.path.isdir(DEFAULT_ECOTAXA_EXPORTED_DATA_SHARE):
+                exported_data_share = DEFAULT_ECOTAXA_EXPORTED_DATA_SHARE
 
         if exported_data_share is not None:
             config["exported_data_share"] = exported_data_share
@@ -994,7 +991,7 @@ class Remote(Obervable):
             logger.info(f"Uploading {src_fn} via HTTP...")
             total = os.fstat(f.fileno()).st_size
 
-            if total > 500 * 1024**2:
+            if total > 500 * 1024 ** 2:
                 logger.warning(
                     "File is larger than 500MiB, HTTP upload will most likely fail."
                 )

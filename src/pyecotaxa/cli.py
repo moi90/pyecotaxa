@@ -18,6 +18,7 @@ from pyecotaxa._config import JsonConfig, find_file_recursive
 from pyecotaxa.archive import Archive, read_tsv, write_tsv
 from pyecotaxa.meta import FileMeta
 from pyecotaxa.remote import ImportMode, ProgressListener, Remote, Transport
+import logging
 
 warnings.simplefilter("error", pd.errors.DtypeWarning)
 
