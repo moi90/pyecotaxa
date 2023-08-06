@@ -1,6 +1,7 @@
 import concurrent.futures
 import enum
-import getpass
+import ftplib
+import functools
 import glob
 import hashlib
 import logging
@@ -14,13 +15,13 @@ import uuid
 import warnings
 import zipfile
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
-import ftplib
+
 import requests
-import urllib3.util.retry
 import requests.adapters
 import requests_toolbelt
 import semantic_version
 import tqdm
+import urllib3.util.retry
 import werkzeug
 from atomicwrites import atomic_write as _atomic_write
 
@@ -31,6 +32,7 @@ from pyecotaxa._config import (
     find_file_recursive,
     load_env,
 )
+from pyecotaxa.meta import FileMeta
 from pyecotaxa.status import progress_meter
 
 logger = logging.getLogger(__name__)
@@ -39,8 +41,8 @@ logger = logging.getLogger(__name__)
 class ImportMode(enum.Enum):
     # Yes = Update metadata only. Cla = Also update classifications. Else create.
     CREATE = "No"
-    UPDATE = "Yes"
-    UPDATE_ANNOTATE = "Cla"
+    UPDATE_META = "Yes"
+    UPDATE_ANNO = "Cla"
 
 
 class Transport(enum.Enum):
@@ -108,7 +110,7 @@ def removesuffix(s: str, suffix: str) -> str:
         return s[:]
 
 
-def copyfile_progress(src, dst, chunksize=1024**2):
+def copyfile_progress(src, dst, chunksize=1024 ** 2):
     """Copy data from src to dst with progress"""
 
     with open(src, "rb") as fsrc:
@@ -845,7 +847,7 @@ class Remote(Obervable):
             logger.info(f"Uploading {src_fn} via HTTP...")
             total = os.fstat(f.fileno()).st_size
 
-            if total > 500 * 1024**2:
+            if total > 500 * 1024 ** 2:
                 logger.warning(
                     "File is larger than 500MiB, HTTP upload will most likely fail."
                 )
@@ -878,7 +880,7 @@ class Remote(Obervable):
         return filename
 
     def _upload_file_ftp(self, src_fn, force=False) -> str:
-        name = os.path.basename(src_fn)
+        name: str = os.path.basename(src_fn)
 
         with open(src_fn, "rb") as f:
             if force:
@@ -911,8 +913,15 @@ class Remote(Obervable):
                 total=total,
             ) as pm:
                 ftp.cwd(self.config["ftp_datadir"])
-                ftp.mkd(tag)
-                ftp.cwd(tag)
+                try:
+                    ftp.cwd(tag)
+                except ftplib.error_reply as exc:
+                    if exc.args[0] != "550":
+                        raise
+                    ftp.mkd(tag)
+                    ftp.cwd(tag)
+
+                # TODO: Check for existence
                 ftp.storbinary(
                     f"STOR {name}", f, callback=lambda block: pm.update(len(block))
                 )
@@ -959,7 +968,7 @@ class Remote(Obervable):
         else:
             raise ValueError(f"Unknown transport: {transport!r}")
 
-        print(f"Remote filename is {remote_fn}.")
+        logger.info(f"Remote filename is {remote_fn}.")
 
         # Find running or finished import task for project_id
         jobs = self._get_jobs(
