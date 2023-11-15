@@ -289,8 +289,6 @@ class Remote(Obervable):
 
         self.config = check_config(config)
 
-        self._check_version()
-
         # TODO: Use session everywhere
         self._session = requests.Session()
         retry = urllib3.util.retry.Retry(connect=3, backoff_factor=0.5)
@@ -298,14 +296,44 @@ class Remote(Obervable):
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
 
-    def _check_version(self):
-        response = requests.get(
-            urllib.parse.urljoin(self.config["api_endpoint"], "openapi.json"),
-        )
+        self._check_version()
+
+    def get(self, path, headers: Optional[Mapping] = None, **kwargs):
+        """Retrieve data from the specified path."""
+        # Build url from API endpoint and supplied path
+        url = urllib.parse.urljoin(self.config["api_endpoint"], path)
+
+        # Build headers
+        if headers is None:
+            headers = self.auth_headers
+        else:
+            headers = {**self.auth_headers, **headers}
+
+        response = self._session.get(url, headers=headers, **kwargs)
 
         self._check_response(response)
 
-        openapi_schema = response.json()
+        return response.json()
+
+    def post(self, path, headers: Optional[Mapping] = None, **kwargs):
+        """Retrieve data from the specified path."""
+        # Build url from API endpoint and supplied path
+        url = urllib.parse.urljoin(self.config["api_endpoint"], path)
+
+        # Build headers
+        if headers is None:
+            headers = self.auth_headers
+        else:
+            headers = {**self.auth_headers, **headers}
+
+        response = self._session.post(url, headers=headers, **kwargs)
+
+        self._check_response(response)
+
+        return response.json()
+
+    def _check_version(self):
+        openapi_schema = self.get("openapi.json")
 
         version = openapi_schema.get("info", {}).get("version", "0.0.0")
 
@@ -322,26 +350,26 @@ class Remote(Obervable):
 
     def login(self, username: str, password: str):
         """Login and store api_token."""
-        response = requests.post(
-            urllib.parse.urljoin(self.config["api_endpoint"], "login"),
+
+        api_token = self.post(
+            "login",
             json={"password": password, "username": username},
         )
 
-        self._check_response(response)
-
-        self.config["api_token"] = api_token = response.json()
+        self.config["api_token"] = api_token
 
         return api_token
 
     @property
     def auth_headers(self):
         if not self.config["api_token"]:
-            raise ValueError("API token not set")
+            return {}
 
         return {"Authorization": f"Bearer {self.config['api_token']}"}
 
     def _get_job(self, job_id) -> Dict:
         """Retrieve details about a job."""
+
         response = requests.get(
             urllib.parse.urljoin(self.config["api_endpoint"], f"jobs/{job_id}/"),
             headers=self.auth_headers,
