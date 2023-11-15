@@ -301,11 +301,7 @@ class Remote(Obervable):
             config["import_data_share"] = import_data_share
 
         self.config = check_config(config)
-
         self.n_workers = n_workers
-
-        self._check_version()
-
         # TODO: Use session everywhere
         self._session = requests.Session()
         retry = urllib3.util.retry.Retry(connect=3, backoff_factor=0.5)
@@ -348,7 +344,7 @@ class Remote(Obervable):
         self._check_response(response)
 
         return response.json()
-    
+
     def put(self, path, headers: Optional[Mapping] = None, **kwargs):
         """Put data to the specified path."""
         # Build url from API endpoint and supplied path
