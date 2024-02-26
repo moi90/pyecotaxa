@@ -579,7 +579,7 @@ class Remote(Obervable):
         return job
 
     def _download_archive(
-        self, project_id, *, target_directory: str, with_images: bool
+        self, project_id, *, target_directory: str, with_images: bool, filters: Mapping
     ) -> str:
         """Export and download project."""
 
@@ -592,9 +592,10 @@ class Remote(Obervable):
         ]
 
         if not matches:
-            job = self._start_project_export(project_id, with_images=with_images)
+            job = self._start_project_export(
+                project_id, with_images=with_images, filters=filters
+            )
         else:
-            print(f"Existing export job for {project_id}.")
             job = matches[0]
 
         # Wait for job to be finished
@@ -677,6 +678,7 @@ class Remote(Obervable):
         cleanup_task_data: bool,
         with_images: bool,
         filters: Mapping,
+        force_download: bool,
     ) -> str:
         """Find and return the name of the local copy of the requested project."""
 
@@ -684,7 +686,7 @@ class Remote(Obervable):
             pattern = os.path.join(target_directory, f"export_{project_id}_*.zip")
             matches = glob.glob(pattern)
 
-            if matches:
+            if matches and not force_download:
                 print(f"Export for {project_id} is available locally.")
                 archive_fn = matches[0]
             else:
@@ -745,6 +747,7 @@ class Remote(Obervable):
         cleanup_task_data=True,
         with_images=True,
         filters: Optional[Mapping] = None,
+        force_download: bool = False,
     ) -> List[str]:
         """
         Export a project archive and transfer to a local directory.
@@ -785,6 +788,7 @@ class Remote(Obervable):
                 cleanup_task_data=cleanup_task_data,
                 with_images=with_images,
                 filters=filters,
+                force_download=force_download,
             )
             for project_id in project_ids
         ]
