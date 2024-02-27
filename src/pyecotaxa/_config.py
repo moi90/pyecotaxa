@@ -1,7 +1,7 @@
 import json
 import os
 import collections.abc
-from typing import Dict
+from typing import Dict, Iterator
 import warnings
 
 ENV_PREFIX = "PYECOTAXA_"
@@ -154,3 +154,39 @@ default_config = {
     "ftp_datadir": "/Ecotaxa_Data_to_import/pyecotaxa",
     "ftp_server_root": "FTP",
 }
+
+
+class MultiConfig(collections.abc.MutableMapping):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self._values = {}
+
+    def update_from(self, other: collections.abc.Mapping, src: str):
+        for k, v in other.items():
+            self.set(k, v, src=src)
+
+    def __getitem__(self, key):
+        return self._values[key][0]
+
+    def set(self, key, value, src):
+        self._values[key] = (value, src)
+
+    def __setitem__(self, key, value):
+        self.set(key, value, src=None)
+
+    def __delitem__(self, key):
+        del self._values[key]
+
+    def items_with_src(self):
+        for k, v_src in self._values.items():
+            yield (k, *v_src)
+
+    def __iter__(self) -> Iterator:
+        return iter(self._values.keys())
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __str__(self) -> str:
+        return "\n".join(f"{k!r}: {v!r} ({src})" for k, v, src in self.items_with_src())
