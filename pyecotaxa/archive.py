@@ -1,79 +1,31 @@
 """Read and write EcoTaxa archives and individual EcoTaxa TSV files."""
 
+import csv
 import fnmatch
 import io
 import pathlib
 import posixpath
 import shutil
 import tarfile
-import warnings
 import zipfile
-from typing import IO, Callable, List, Mapping, Optional, Union
+from io import BufferedReader, BytesIO, IOBase
+from typing import (
+    IO,
+    Any,
+    BinaryIO,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
-import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
 __all__ = ["read_tsv", "write_tsv"]
-
-
-def _fix_types(dataframe: pd.DataFrame, enforce_types):
-    header = dataframe.columns.get_level_values(0)
-    types = dataframe.columns.get_level_values(1)
-
-    dataframe.columns = header
-
-    float_cols = []
-    text_cols = []
-    for c, t in zip(header, types):
-        if t == "[f]":
-            float_cols.append(c)
-        elif t == "[t]":
-            text_cols.append(c)
-        else:
-            # If the first row contains other values than [f] or [t],
-            # it is not a type header but a normal line of values and has to be inserted into the dataframe.
-            # This is the case for "General export".
-
-            # Clean up empty fields
-            types = [None if t.startswith("Unnamed") else t for t in types]
-
-            # Parse and prepend the current "types" to the dataframe
-            row0_str = pd.DataFrame([types], columns=header).to_csv(index=False)
-            row0 = pd.read_csv(
-                io.StringIO(row0_str),
-                index_col=False,
-                # Use dt.name, because pd.Int64Dtype does not work here directly
-                dtype={c: dt.name for c, dt in dataframe.dtypes.items()},
-            )
-
-            if enforce_types:
-                raise ValueError("enforce_types=True, but no type header was found.")
-
-            return pd.concat((row0, dataframe), ignore_index=True)
-
-    if enforce_types:
-        # Enforce [f] types
-        dataframe[float_cols] = dataframe[float_cols].astype(float)
-        dataframe[text_cols] = dataframe[text_cols].fillna("").astype(str)
-    else:
-        # Replace NaN with empty string in string columns
-        for c in dataframe.columns:
-            if pd.api.types.is_string_dtype(dataframe.dtypes[c]):
-                dataframe[c] = dataframe[c].fillna("")
-
-    return dataframe
-
-
-def _apply_usecols(
-    df: pd.DataFrame, usecols: Union[Callable, List[str]]
-) -> pd.DataFrame:
-    if callable(usecols):
-        columns = [c for c in df.columns.get_level_values(0) if usecols(c)]
-    else:
-        columns = [c for c in df.columns.get_level_values(0) if c in usecols]
-
-    return df[columns]
 
 
 DEFAULT_DTYPES = {
@@ -98,73 +50,106 @@ DEFAULT_DTYPES = {
 }
 
 
+def _parse_tsv_header(
+    f: IOBase, encoding: str
+) -> Tuple[Optional[Sequence[str]], Dict[str, Any], int]:
+    skiprows = 0
+
+    header: List[str] = []
+    while len(header) < 2:
+        line = f.readline()
+
+        if not line:
+            break
+
+        skiprows += 1
+
+        if isinstance(line, bytes):
+            line = line.decode(encoding)
+
+        if not line.startswith("#"):
+            header.append(line)
+
+    if not header:
+        return None, {}, 0
+
+    csv_reader = csv.reader(header, delimiter="\t")
+
+    names = next(csv_reader)
+
+    try:
+        maybe_types = next(csv_reader)
+    except StopIteration:
+        # No second line
+        return names, {}, skiprows
+
+    if len(names) != len(maybe_types):
+        raise ValueError("Number of names does not match number of types")
+
+    # Second line *might* contain types
+    if all(t in ("[t]", "[f]") for t in maybe_types):
+        # Infer dtype
+        dtype = {n: str for n, t in zip(names, maybe_types) if t == "[t]"}
+    else:
+        # This wasn't a type row after all
+        dtype = {}
+        skiprows -= 1
+
+    return names, dtype, skiprows
+
+
 def read_tsv(
-    filepath_or_buffer,
+    fn_or_f: Union[str, pathlib.Path, IOBase],
     encoding: str = "utf-8-sig",
-    enforce_types: Optional[bool] = None,
-    usecols: Union[None, Callable, List[str]] = None,
     dtype=None,
+    enforce_types=True,
     **kwargs,
-) -> pd.DataFrame:
+):
     """
-    Read an individual EcoTaxa TSV file.
-
-    Args:
-        filepath_or_buffer (str, path object or file-like object): ...
-        encoding (str, optional): Encoding of the TSV file.
-            With the default "utf-8-sig", both UTF8 and signed UTF8 can be read.
-        enforce_types: Enforce the column dtypes provided in the header.
-            Usually, it is desirable to use the default dtypes and allow pandas to infer the column dtypes.
-        usecols: List of strings or callable.
-        **kwargs: Additional kwargs are passed to :func:`pandas:pandas.read_csv`.
-
-    Returns:
-        A Pandas :class:`~pandas:pandas.DataFrame`.
+    We just use the type header (if provided) to make sure that the appropriate columns are treated as strings.
     """
+    must_close = False
+    f: BinaryIO
 
-    if enforce_types:
-        dtype = str
+    if dtype is None:
+        dtype = DEFAULT_DTYPES
+
+    if isinstance(fn_or_f, str):
+        fn_or_f = pathlib.Path(fn_or_f)
+
+    if hasattr(fn_or_f, "open"):
+        f = fn_or_f.open("r", encoding=encoding)  # type: ignore
+        must_close = True
     else:
-        if dtype is None:
-            dtype = DEFAULT_DTYPES
-        elif isinstance(dtype, Mapping):
-            dtype = {**DEFAULT_DTYPES, **dtype}
+        f = fn_or_f  # type: ignore
+
+    try:
+        if f.seekable():
+            # We can just rewind after inspecting the header
+            names, header_dtype, skiprows = _parse_tsv_header(f, encoding)
+            f.seek(0)
         else:
-            # One dtype for all columns
-            pass
+            # Make sure that we can peek into the file
+            if not hasattr(f, "peek"):
+                f = BufferedReader(f)  # type: ignore
 
-    if usecols is not None:
-        chunksize = kwargs.pop("chunksize", 10000)
+            # Peek the first 8kb and inspect
+            header_f = BytesIO(f.peek(8 * 1024))  # type: ignore
+            names, header_dtype, skiprows = _parse_tsv_header(header_f)
 
-        # Read a few rows a time
-        dataframe: pd.DataFrame = pd.concat(
-            [
-                _apply_usecols(chunk, usecols)
-                for chunk in pd.read_csv(
-                    filepath_or_buffer,
-                    sep="\t",
-                    encoding=encoding,
-                    header=[0, 1],
-                    chunksize=chunksize,
-                    dtype=dtype,
-                    **kwargs,
-                )
-            ]
-        )  # type: ignore
-    else:
-        if kwargs.pop("chunksize", None) is not None:
-            warnings.warn("Parameter chunksize is ignored.")
+        if enforce_types:
+            dtype = {**dtype, **header_dtype}
 
-        dataframe: pd.DataFrame = pd.read_csv(
-            filepath_or_buffer,
-            sep="\t",
-            encoding=encoding,
-            header=[0, 1],
-            dtype=dtype,
-            **kwargs,
-        )  # type: ignore
+        dataframe = pd.read_csv(f, sep="\t", names=names, dtype=dtype, skiprows=skiprows, **kwargs)  # type: ignore
 
-    return _fix_types(dataframe, enforce_types)
+        for c, dt in dataframe.dtypes.items():
+            if pd.api.types.is_string_dtype(dt):
+                dataframe[c] = dataframe[c].fillna("")
+
+        return dataframe
+    finally:
+        if must_close:
+            f.close()
 
 
 def _dtype_to_ecotaxa(dtype):
@@ -297,6 +282,8 @@ class Archive:
 
     def open(self, member_fn, mode="r", compress_hint=True) -> IO:
         """
+        Open an archive member.
+
         Raises:
             MemberNotFoundError if mode=="r" and the member was not found.
         """
