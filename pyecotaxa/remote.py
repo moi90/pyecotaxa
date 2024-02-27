@@ -20,13 +20,14 @@ import requests
 import requests.adapters
 import requests_toolbelt
 import semantic_version
-import tqdm
 import urllib3.util.retry
 import werkzeug
 from atomicwrites import atomic_write as _atomic_write
+from tqdm.auto import tqdm
 
 from pyecotaxa._config import (
     JsonConfig,
+    MultiConfig,
     check_config,
     default_config,
     find_file_recursive,
@@ -110,7 +111,7 @@ def removesuffix(s: str, suffix: str) -> str:
         return s[:]
 
 
-def copyfile_progress(src, dst, chunksize=1024 ** 2):
+def copyfile_progress(src, dst, chunksize=1024**2):
     """Copy data from src to dst with progress"""
 
     with open(src, "rb") as fsrc:
@@ -153,7 +154,7 @@ class ProgressListener:
         try:
             progress_bar = self.progress_bars[target]
         except KeyError:
-            progress_bar = self.progress_bars[target] = tqdm.tqdm(
+            progress_bar = self.progress_bars[target] = tqdm(
                 position=0 if target is None else None, unit_scale=True
             )
 
@@ -256,17 +257,22 @@ class Remote(Obervable):
     ):
         super().__init__()
 
+        config = MultiConfig()
+
+        config.update_from(default_config, "<default>")
+
         user_config_fn = os.path.expanduser("~/.pyecotaxa.json")
+        config.update_from(JsonConfig(user_config_fn, verbose=verbose), user_config_fn)
+
         local_config_fn = find_file_recursive(".pyecotaxa.json")
+        config.update_from(
+            JsonConfig(local_config_fn, verbose=verbose), local_config_fn
+        )
 
-        # Load config from files and environment
-        config = {
-            **default_config,
-            **JsonConfig(user_config_fn, verbose=verbose),
-            **JsonConfig(local_config_fn, verbose=verbose),
-            **load_env(verbose=verbose),
-        }
+        config.update_from(load_env(verbose=verbose), "<environment>")
 
+        # Update config from parameters
+        # TODO: Use `set`
         if api_endpoint is not None:
             config["api_endpoint"] = api_endpoint
 
@@ -281,8 +287,6 @@ class Remote(Obervable):
 
         self.config = check_config(config)
 
-        self._check_version()
-
         # TODO: Use session everywhere
         self._session = requests.Session()
         retry = urllib3.util.retry.Retry(connect=3, backoff_factor=0.5)
@@ -290,14 +294,44 @@ class Remote(Obervable):
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
 
-    def _check_version(self):
-        response = requests.get(
-            urllib.parse.urljoin(self.config["api_endpoint"], "openapi.json"),
-        )
+        self._check_version()
+
+    def get(self, path, headers: Optional[Mapping] = None, **kwargs):
+        """Retrieve data from the specified path."""
+        # Build url from API endpoint and supplied path
+        url = urllib.parse.urljoin(self.config["api_endpoint"], path)
+
+        # Build headers
+        if headers is None:
+            headers = self.auth_headers
+        else:
+            headers = {**self.auth_headers, **headers}
+
+        response = self._session.get(url, headers=headers, **kwargs)
 
         self._check_response(response)
 
-        openapi_schema = response.json()
+        return response.json()
+
+    def post(self, path, headers: Optional[Mapping] = None, **kwargs):
+        """Retrieve data from the specified path."""
+        # Build url from API endpoint and supplied path
+        url = urllib.parse.urljoin(self.config["api_endpoint"], path)
+
+        # Build headers
+        if headers is None:
+            headers = self.auth_headers
+        else:
+            headers = {**self.auth_headers, **headers}
+
+        response = self._session.post(url, headers=headers, **kwargs)
+
+        self._check_response(response)
+
+        return response.json()
+
+    def _check_version(self):
+        openapi_schema = self.get("openapi.json")
 
         version = openapi_schema.get("info", {}).get("version", "0.0.0")
 
@@ -314,26 +348,26 @@ class Remote(Obervable):
 
     def login(self, username: str, password: str):
         """Login and store api_token."""
-        response = requests.post(
-            urllib.parse.urljoin(self.config["api_endpoint"], "login"),
+
+        api_token = self.post(
+            "login",
             json={"password": password, "username": username},
         )
 
-        self._check_response(response)
-
-        self.config["api_token"] = api_token = response.json()
+        self.config["api_token"] = api_token
 
         return api_token
 
     @property
     def auth_headers(self):
         if not self.config["api_token"]:
-            raise ValueError("API token not set")
+            return {}
 
         return {"Authorization": f"Bearer {self.config['api_token']}"}
 
     def _get_job(self, job_id) -> Dict:
         """Retrieve details about a job."""
+
         response = requests.get(
             urllib.parse.urljoin(self.config["api_endpoint"], f"jobs/{job_id}/"),
             headers=self.auth_headers,
@@ -449,11 +483,11 @@ class Remote(Obervable):
             project_id, job_id, target_directory=target_directory
         )
 
-    def _start_project_export(self, project_id, *, with_images):
+    def _start_project_export(self, project_id, *, with_images, filters):
         response = requests.post(
             urllib.parse.urljoin(self.config["api_endpoint"], "object_set/export"),
             json={
-                "filters": {},
+                "filters": filters,
                 "request": {
                     "project_id": project_id,
                     "exp_type": "BAK",
@@ -543,7 +577,7 @@ class Remote(Obervable):
         return job
 
     def _download_archive(
-        self, project_id, *, target_directory: str, with_images: bool
+        self, project_id, *, target_directory: str, with_images: bool, filters: Mapping
     ) -> str:
         """Export and download project."""
 
@@ -556,9 +590,10 @@ class Remote(Obervable):
         ]
 
         if not matches:
-            job = self._start_project_export(project_id, with_images=with_images)
+            job = self._start_project_export(
+                project_id, with_images=with_images, filters=filters
+            )
         else:
-            print(f"Existing export job for {project_id}.")
             job = matches[0]
 
         # Wait for job to be finished
@@ -640,6 +675,8 @@ class Remote(Obervable):
         check_integrity: bool,
         cleanup_task_data: bool,
         with_images: bool,
+        filters: Mapping,
+        force_download: bool,
     ) -> str:
         """Find and return the name of the local copy of the requested project."""
 
@@ -647,7 +684,7 @@ class Remote(Obervable):
             pattern = os.path.join(target_directory, f"export_{project_id}_*.zip")
             matches = glob.glob(pattern)
 
-            if matches:
+            if matches and not force_download:
                 print(f"Export for {project_id} is available locally.")
                 archive_fn = matches[0]
             else:
@@ -655,6 +692,7 @@ class Remote(Obervable):
                     project_id,
                     target_directory=target_directory,
                     with_images=with_images,
+                    filters=filters,
                 )
 
             print(f"Got {archive_fn}.")
@@ -706,6 +744,8 @@ class Remote(Obervable):
         check_integrity=True,
         cleanup_task_data=True,
         with_images=True,
+        filters: Optional[Mapping] = None,
+        force_download: bool = False,
     ) -> List[str]:
         """
         Export a project archive and transfer to a local directory.
@@ -722,6 +762,9 @@ class Remote(Obervable):
 
         if isinstance(project_ids, int):
             project_ids = [project_ids]
+
+        if filters is None:
+            filters = {}
 
         os.makedirs(target_directory, exist_ok=True)
 
@@ -742,6 +785,8 @@ class Remote(Obervable):
                 check_integrity=check_integrity,
                 cleanup_task_data=cleanup_task_data,
                 with_images=with_images,
+                filters=filters,
+                force_download=force_download,
             )
             for project_id in project_ids
         ]
@@ -847,7 +892,7 @@ class Remote(Obervable):
             logger.info(f"Uploading {src_fn} via HTTP...")
             total = os.fstat(f.fileno()).st_size
 
-            if total > 500 * 1024 ** 2:
+            if total > 500 * 1024**2:
                 logger.warning(
                     "File is larger than 500MiB, HTTP upload will most likely fail."
                 )
