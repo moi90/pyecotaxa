@@ -138,7 +138,18 @@ def match_request(request: Mapping, pattern: Mapping):
 
     _missing = object()
 
-    return all(request.get(k, _missing) == v for k, v in pattern.items())
+    differences = {
+        k: f"{v} vs. {request.get(k, '<missing>')}"
+        for k, v in pattern.items()
+        if request.get(k, _missing) != v
+    }
+
+    if differences:
+        logger.debug(
+            "Differences: " + (", ".join(f"{k}: {v}" for k, v in differences.items()))
+        )
+
+    return not differences
 
 
 class State(enum.Enum):
@@ -219,6 +230,9 @@ def _value_matches_query(value, query) -> bool:
         return all(
             _value_matches_query(value.get(k, _none), qv) for k, qv in query.items()
         )
+
+    if isinstance(value, str) and isinstance(query, str):
+        return value == query
 
     if isinstance(value, Sequence) and isinstance(query, Sequence):
         if len(value) != len(query):
@@ -407,45 +421,33 @@ class Remote(Obervable):
         _, options = werkzeug.http.parse_options_header(
             response.headers["content-disposition"]
         )
-        filename = posixpath.basename(options["filename"])
+        name = posixpath.basename(options["filename"])
 
-        dest = os.path.join(target_directory, filename)
+        local_filename = os.path.join(target_directory, name)
 
-        print(f"Downloading {response.url} to {dest}...")
+        logger.info(f"Downloading {response.url} to {local_filename}...")
 
         try:
-            self._notify_observers(
-                project_id, description=f"Downloading...", progress=0, total=1
-            )
-            with atomic_write(dest) as f:
-                progress = 0
+            with tqdm(
+                unit="iB",
+                unit_scale=True,
+                unit_divisor=1024,
+                total=content_length,
+                desc=f"Downloading {name}...",
+            ) as pm, atomic_write(local_filename) as fout:
                 for chunk in response.iter_content(chunksize):
-                    f.write(chunk)
-                    progress += len(chunk)
-                    self._notify_observers(
-                        project_id,
-                        description=f"Downloading...",
-                        progress=progress,
-                        total=content_length,
-                        unit="iB",
-                    )
-                self._notify_observers(
-                    project_id,
-                    description=f"Downloading...",
-                    progress=progress,
-                    total=progress,
-                    unit="iB",
-                )
+                    fout.write(chunk)
+                    pm.update(len(chunk))
         except:
             # Cleaup destination file
             try:
-                os.remove(dest)
+                os.remove(local_filename)
             except FileNotFoundError:
                 pass
 
             raise
 
-        return dest
+        return local_filename
 
     def _get_job_file_local(self, project_id, job_id, *, target_directory: str) -> str:
         """Download an exported archive and return the local file name."""
@@ -466,7 +468,7 @@ class Remote(Obervable):
         # Local filename should not have the task_<id>_ prefix to match get_job_file_remote
         dest = os.path.join(target_directory, removeprefix(filename, f"task_{job_id}_"))
 
-        print(f"Copying {remote_fn} to {dest}...")
+        logger.info(f"Copying {remote_fn} to {dest}...")
 
         try:
             copyfile_progress(remote_fn, dest)
@@ -512,12 +514,12 @@ class Remote(Obervable):
             local_filename = os.path.join(target_directory, name)
 
             with tqdm(
-                unit="B",
+                unit="iB",
                 unit_scale=True,
                 unit_divisor=1024,
                 total=size,
                 desc=f"Downloading {name}...",
-            ) as pm, open(local_filename, "wb") as fout:
+            ) as pm, atomic_write(local_filename) as fout:
 
                 def writeblock(block: bytes):
                     fout.write(block)
@@ -613,17 +615,16 @@ class Remote(Obervable):
             job:
             task_descr: Task description for progress meter.
         """
-        with tqdm(desc=task_descr, total=100, unit="%") as pm:
+        with tqdm(desc=task_descr, total=100, unit="%") as pbar:
             # 'P' for Pending (Waiting for an execution thread)
             # 'R' for Running (Being executed inside a thread)
             # 'A' for Asking (Needing user information before resuming)
             # 'E' for Error (Stopped with error)
             # 'F' for Finished (Done)."
             while job["state"] not in "FE":
-                pm.set(
-                    job["progress_pct"] or 0,
-                )
-                pm.set_description(f"{task_descr} ({job['progress_msg']})")
+                pct = job["progress_pct"] or 0
+                pbar.update(pct - pbar.n)
+                pbar.set_description(f"{task_descr} ({job['progress_msg']})")
 
                 time.sleep(5)
 
@@ -680,7 +681,7 @@ class Remote(Obervable):
         # Wait for job to be finished
         job = self._wait_job_progress(job, f"Exporting {project_id}...")
 
-        print(f"Export job for {project_id} done.")
+        logger.info(f"Export job for {project_id} done.")
 
         # Download job file
         archive_fn = self._get_job_file(
@@ -770,7 +771,7 @@ class Remote(Obervable):
             matches = glob.glob(pattern)
 
             if matches and not force_download:
-                print(f"Export for {project_id} is available locally.")
+                logger.info(f"Export for {project_id} is available locally.")
                 archive_fn = matches[0]
             else:
                 archive_fn = self._export_and_download_archive(
@@ -781,7 +782,7 @@ class Remote(Obervable):
                     transport=transport,
                 )
 
-            print(f"Got {archive_fn}.")
+            logger.info(f"Got {archive_fn}.")
 
             if check_integrity:
                 self._check_archive(project_id, archive_fn)
@@ -1013,6 +1014,7 @@ class Remote(Obervable):
         return filename
 
     def _upload_file_ftp(self, src_fn, force=False) -> str:
+        logger.info(f"Uploading {src_fn} via FTP...")
         name: str = os.path.basename(src_fn)
 
         with open(src_fn, "rb") as f:
@@ -1031,33 +1033,43 @@ class Remote(Obervable):
                 #     logger.info(f"{src_fn} is already available remotely: {remote_fn}")
                 #     return remote_fn
 
-            logger.info(f"Uploading {src_fn} via FTP...")
             total = os.fstat(f.fileno()).st_size
 
             with ftplib.FTP(
                 self.config["ftp_host"],
                 self.config["ftp_user"],
                 self.config["ftp_passwd"],
-            ) as ftp, tqdm(
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                total=total,
-                desc=f"Uploading {name}...",
-            ) as pm:
+            ) as ftp:
                 ftp.cwd(self.config["ftp_datadir"])
                 try:
                     ftp.cwd(tag)
-                except ftplib.error_reply as exc:
-                    if exc.args[0] != "550":
+                except ftplib.Error as exc:
+                    if not exc.args[0].strip().startswith("550"):
                         raise
                     ftp.mkd(tag)
                     ftp.cwd(tag)
 
-                # TODO: Check for existence
-                ftp.storbinary(
-                    f"STOR {name}", f, callback=lambda block: pm.update(len(block))
-                )
+                try:
+                    # Check for existence
+                    ftp.size(name)
+                except ftplib.Error:
+                    should_upload = True
+                else:
+                    should_upload = False
+
+                if should_upload:
+                    with tqdm(
+                        unit="B",
+                        unit_scale=True,
+                        unit_divisor=1024,
+                        total=total,
+                        desc=f"Uploading {name}...",
+                    ) as pm:
+                        ftp.storbinary(
+                            f"STOR {name}",
+                            f,
+                            callback=lambda block: pm.update(len(block)),
+                        )
 
         filename = posixpath.join(
             self.config["ftp_server_root"],
@@ -1106,13 +1118,17 @@ class Remote(Obervable):
         # Find running or finished import task for project_id
         jobs = self._get_jobs(
             type="FileImport",
-            params={"req": {"project_id": project_id, "source_path": remote_fn}},
+            params={"prj_id": project_id, "req": {"source_path": remote_fn}},
         )
+
+        # Only look for non-failed jobs
+        jobs = [job for job in jobs if job["state"] != "E"]
 
         if not jobs:
             job = self._start_project_import(project_id, remote_fn, mode)
         else:
             job = jobs[0]
+            logger.info(f"Job to import {remote_fn} already exists...")
 
         # Wait for job to be finished
         job = self._wait_job_progress(job, f"Importing to {project_id}...")
@@ -1124,7 +1140,6 @@ class Remote(Obervable):
     def _validate_meta(self, root: str, meta: Mapping[str, Mapping[str, Any]]):
         def validate():
             for file_fn, file_meta in meta.items():
-                print(file_fn, meta)
                 if not os.path.isfile(os.path.join(root, file_fn)):
                     print(f"WARNING: {file_fn} is missing.")
                     continue
