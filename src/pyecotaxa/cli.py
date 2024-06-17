@@ -25,12 +25,21 @@ warnings.simplefilter("error", pd.errors.DtypeWarning)
 
 @click.group()
 @click.version_option(version=pyecotaxa.__version__)
-def cli():  # pragma: no cover
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    help="Be verbose",
+)
+def cli(verbose):  # pragma: no cover
     """
     Command line client for pyecotaxa.
     """
 
-    logging.getLogger().setLevel(logging.INFO)
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    else:
+        logging.getLogger().setLevel(logging.INFO)
 
 
 @cli.command()
@@ -112,7 +121,25 @@ def login(chdir, destination, verbose):
     metavar="PATH",
     help="Run as if started in PATH instead of the current working directory.",
 )
-def pull(project_ids, with_images, chdir):
+@click.option(
+    "--http",
+    "transport",
+    flag_value="http",
+    help="Use HTTP for data transfer",
+)
+@click.option(
+    "--ftp",
+    "transport",
+    flag_value="ftp",
+    help="Use FTP for data transfer",
+)
+@click.option(
+    "--share",
+    "transport",
+    flag_value="share",
+    help="Use file share for data transfer",
+)
+def pull(project_ids, with_images, chdir, transport):
     """
     Pull projects from the EcoTaxa server.
 
@@ -125,9 +152,19 @@ def pull(project_ids, with_images, chdir):
 
     progress_listener = ProgressListener()
 
-    transfer = Remote()
-    transfer.register_observer(progress_listener.update)
-    transfer.pull(project_ids, with_images=with_images)
+    remote = Remote()
+
+    if transport is None:
+        transport = (
+            Transport.SHARE
+            if remote.config["exported_data_share"] is not None
+            else Transport.HTTP
+        )
+    else:
+        transport = Transport(transport)
+
+    remote.register_observer(progress_listener.update)
+    remote.pull(project_ids, with_images=with_images, transport=transport)
 
 
 @cli.command()
