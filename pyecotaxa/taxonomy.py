@@ -9,7 +9,6 @@ import anytree.exporter.jsonexporter
 
 def _gen_cache_fn(filename, ext, prefix="."):
     head, tail = os.path.split(filename)
-    name = os.path.splitext(tail)[0]
     return os.path.join(head, prefix + tail + ext)
 
 
@@ -45,15 +44,19 @@ def load_taxonomy(taxoexport_fn, cache=True) -> anytree.Node:
                 if parent_id is not None
                 else taxoexport[taxoexport["parent_id"].isna()]
             )
-            for c in children.itertuples():
+            for child in children.itertuples():
                 n = anytree.Node(
-                    str(c.name), parent=parent, unique_name=str(c.display_name)
+                    str(child.name),
+                    parent=parent,
+                    display_name=str(child.display_name),
+                    taxotype=str(child.taxotype),
+                    source_desc=str(child.source_desc),
                 )
                 progress.update()
 
-                create_children(n, parent_id=c.id, depth=depth + 1)
+                create_children(n, parent_id=child.id, depth=depth + 1)
 
-        traxotree = anytree.Node("#", unique_name="")
+        traxotree = anytree.Node("#", display_name="")
         create_children(traxotree, None)
 
     if cache:
@@ -109,11 +112,13 @@ class Matcher:
     def match(self, path: str) -> Tuple[str, str, List]:
         parts = path.split(self.separator)
 
-        parts, remainder, unique_name = self._find_prefix(parts)
+        parts, remainder, display_name = self._find_prefix(parts)
 
         root = (
-            anytree.search.find(self.tree, lambda node: node.unique_name == unique_name)
-            if unique_name is not None
+            anytree.search.find(
+                self.tree, lambda node: node.display_name == display_name
+            )
+            if display_name is not None
             else None
         )
         nodes = [root or self.tree]
@@ -160,7 +165,6 @@ def map_categories(
     case_insensitive=True,
     validate_mapping=False,
 ):
-
     if mapping_df is None:
         mapping_df = pd.DataFrame(columns=["label", "object_annotation_category"])
 
@@ -168,10 +172,12 @@ def map_categories(
     if validate_mapping:
         print("Validating existing assignments...")
         invalid_mask = mapping_df["object_annotation_category"].map(
-            lambda unique_name: unique_name != ""
+            lambda display_name: display_name != ""
             and anytree.search.find(
                 taxonomy,
-                lambda node: str_equal(node.unique_name, unique_name, case_insensitive),
+                lambda node: str_equal(
+                    node.display_name, display_name, case_insensitive
+                ),
             )
             is None
         )
@@ -214,13 +220,13 @@ def map_categories(
             notes.append(msg)
 
         if len(nodes) > 1:
-            msg = f"Multiple matches: " + (", ".join((n.unique_name for n in nodes)))
+            msg = f"Multiple matches: " + (", ".join((n.display_name for n in nodes)))
             print(f"{label}:", msg)
             notes.append(msg)
             target_label = ""
         else:
             msg = ""
-            target_label = nodes[0].unique_name
+            target_label = nodes[0].display_name
 
         mapping_new.append(
             {
