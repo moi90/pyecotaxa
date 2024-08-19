@@ -1,5 +1,6 @@
 """Read and write EcoTaxa archives and individual EcoTaxa TSV files."""
 
+import collections
 import csv
 import fnmatch
 import io
@@ -139,6 +140,18 @@ def read_tsv(
 
         if enforce_types:
             dtype = {**dtype, **header_dtype}
+
+        # Detect duplicate names
+        duplicate_names = [
+            f"'{name}' ({count}x)"
+            for name, count in collections.Counter(names).items()
+            if count > 1
+        ]
+        if duplicate_names:
+            raise ValueError(
+                "TSV file contains duplicate column names: "
+                + (", ".join(duplicate_names))
+            )
 
         dataframe = pd.read_csv(f, sep="\t", names=names, dtype=dtype, skiprows=skiprows, **kwargs)  # type: ignore
 
