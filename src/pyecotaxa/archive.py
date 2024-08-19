@@ -179,7 +179,6 @@ def read_tsv(
         else:
             dtype = {**DEFAULT_DTYPES, **(dtype or {})}  # Merge default dtype with user-specified dtype
 
-
         # Detect duplicate names
         duplicate_names = [
             f"'{name}' ({count}x)"
