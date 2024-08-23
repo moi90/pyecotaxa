@@ -581,3 +581,96 @@ def gen_annotation_update(
         write_tsv(out_data, out_fn)
 
     # object_annotation_status
+
+
+@cli.command()
+@click.argument("taxonomy_fn")
+@click.option(
+    "--project-id",
+    type=int,
+    help="Restrict taxonomy to taxa used in the provided project.",
+)
+@click.option(
+    "--root-category",
+    type=str,
+    help="Restrict taxonomy to taxa below this root category.",
+)
+@click.option(
+    "--chdir",
+    "-C",
+    metavar="PATH",
+    help="Run as if started in PATH instead of the current working directory.",
+)
+def pull_taxonomy(
+    taxonomy_fn: str,
+    project_id: Optional[int],
+    root_category: Optional[str],
+    chdir: bool,
+):
+    """
+    Pull the taxonomy tree from the EcoTaxa server.
+    """
+
+    # Change to specified directory
+    if chdir:
+        os.chdir(chdir)
+
+    remote = Remote()
+
+    if root_category is not None:
+        if project_id is None:
+            raise ValueError(f"--root-category requires --project-id")
+
+        # https://ecotaxa.obs-vlfr.fr/api/docs#/Taxonomy%20Tree/search_taxa
+        taxa_left = list(
+            t["id"]
+            for t in remote.get(
+                "taxon_set/search",
+                params={"query": root_category, "project_id": project_id},
+            )
+        )
+    elif project_id is not None:
+        # Get a list of all used taxon IDs used in this project
+        # https://ecotaxa.obs-vlfr.fr/api/docs#/projects/project_set_get_stats
+        taxa_left = list(
+            remote.get("project_set/taxo_stats", params={"ids": project_id})[0][
+                "used_taxa"
+            ]
+        )
+    else:
+        # Get a list of root taxa
+        # https://ecotaxa.obs-vlfr.fr/api/docs#/Taxonomy%20Tree/query_root_taxa
+        taxa_left = list(taxon["id"] for taxon in remote.get("taxa"))
+
+    # Recursively get information about all used taxon IDs used in this project and their children
+    # https://ecotaxa.obs-vlfr.fr/api/docs#/Taxonomy%20Tree/query_taxa_set
+
+    taxa = []
+    taxa_done = set()
+
+    while taxa_left:
+        # Get the first 500 items of taxa_left
+        taxa_left_sub = taxa_left[:500]
+        del taxa_left[:500]
+
+        print(f"Querying {len(taxa_left_sub)} taxa...")
+        response = remote.get(
+            "taxon_set/query", params={"ids": ",".join(str(id) for id in taxa_left_sub)}
+        )
+        taxa_done.update(taxa_left_sub)
+
+        for row in response:
+            taxa_left.extend(cid for cid in row["children"] if cid not in taxa_done)
+            taxa.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "display_name": row["display_name"],
+                    "lineage": ">".join(reversed(row["lineage"])),
+                }
+            )
+
+    print(f"Pulled {len(taxa)} taxa.")
+    taxa = pd.DataFrame(taxa)
+
+    taxa.to_csv(taxonomy_fn, index=False)
