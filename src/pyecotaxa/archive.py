@@ -167,10 +167,6 @@ def read_tsv(
             header_f = BytesIO(f.peek(8 * 1024))  # type: ignore
             names, header_dtype, skiprows = _parse_tsv_header(header_f, encoding)
 
-        if enforce_types is None:
-            # Default behavior: enforce types from header if present, otherwise use defaults
-            enforce_types = header_dtype is not None
-
         if enforce_types:
             if header_dtype is None:
                 raise ValueError("enforce_types=True, but no type header was found.")
