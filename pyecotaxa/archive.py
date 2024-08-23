@@ -136,7 +136,7 @@ def read_tsv(
 
             # Peek the first 8kb and inspect
             header_f = BytesIO(f.peek(8 * 1024))  # type: ignore
-            names, header_dtype, skiprows = _parse_tsv_header(header_f)
+            names, header_dtype, skiprows = _parse_tsv_header(header_f, encoding)
 
         if enforce_types:
             dtype = {**dtype, **header_dtype}
@@ -285,6 +285,8 @@ class Archive:
                     return super(Archive, subclass).__new__(subclass)
 
             raise UnknownArchiveError(f"No handler found to write {archive_fn}")
+
+        raise ValueError("Unknown mode: {mode}")
 
     @staticmethod
     def is_readable(archive_fn) -> bool:
