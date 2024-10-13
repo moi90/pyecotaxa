@@ -50,6 +50,8 @@ DEFAULT_DTYPES = {
     "sample_id": str,
 }
 
+VALID_PREFIXES = {"object", "sample", "acq", "process", "img"}
+
 
 def _parse_tsv_header(
     f: IOBase, encoding: str
@@ -262,6 +264,10 @@ class ArchivePath:
         return ArchivePath(self.archive, posixpath.join(self.filename, filename))
 
 
+class ValidationError(Exception):
+    pass
+
+
 class Archive:
     """
     A generic archive reader and writer for ZIP and TAR archives.
@@ -350,6 +356,60 @@ class Archive:
                 img_file_name, "w"
             ) as f_dst:
                 shutil.copyfileobj(f_src, f_dst)
+
+    def validate(self):
+        """Mimic the validation done by EcoTaxa."""
+
+        # ecotaxa_back/py/BO/Bundle.py:43
+        MAX_FILES = 2000
+
+        tsv: pd.DataFrame
+
+        for i, (tsv_fn, tsv) in enumerate(self.iter_tsv(), start=1):
+            if i > MAX_FILES:
+                raise ValidationError(
+                    f"Archive contains too many files, max. is {MAX_FILES}"
+                )
+
+            errors = []
+
+            # Validate columns (validate_structure)
+            # ecotaxa_back/py/BO/TSVFile.py:873
+            for c in tsv.columns:
+                if c in DEFAULT_DTYPES:
+                    # This is a known field
+                    # TODO: Check dtype
+                    continue
+
+                try:
+                    prefix, name = c.split("_", 1)
+                except ValueError:
+                    errors.append(
+                        f"Invalid field '{c}', format must be '<prefix>_<name>'"
+                    )
+                    continue
+
+                if prefix not in VALID_PREFIXES:
+                    errors.append(f"Invalid prefix '{prefix}' for column '{c}'")
+                    continue
+
+            # Ensure that each used prefix contains at least an ID
+            for prefix in ["object", "acq", "process", "sample"]:
+                expected_id = f"{prefix}_id"
+                prefix_columns = [c for c in tsv.columns if c.startswith(prefix)]
+                if prefix_columns and expected_id not in tsv.columns:
+                    errors.append(
+                        f"Field {expected_id} is mandatory as there are some '{prefix}' columns: {sorted(prefix_columns)}."
+                    )
+
+            if errors:
+                raise ValidationError(
+                    f"Invalid structure in {tsv_fn}:\n" + ("\n".join(errors))
+                )
+
+            # TODO: Validate contents (validate_content)
+            # ecotaxa_back/py/BO/TSVFile.py:967
+            ...
 
 
 class _TarIO(io.BytesIO):

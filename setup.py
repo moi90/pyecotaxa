@@ -45,7 +45,7 @@ setup(
             "sphinx_rtd_theme",
             "sphinx-autodoc-typehints>=1.10.0",
         ],
-        "dev": ["black"],
+        "dev": ["black", "versioneer"],
     },
     entry_points={"console_scripts": ["pyecotaxa=pyecotaxa.cli:cli"]},
     classifiers=[

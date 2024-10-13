@@ -204,7 +204,7 @@ def pull(project_ids, with_images, chdir, transport):
     "--update-meta",
     "mode",
     flag_value="UPDATE_META",
-    help="Only update metadata (no creation of objects)",
+    help="Only update metadata (no creation of objects, no update of annotations)",
 )
 @click.option(
     "--update-anno",
@@ -219,7 +219,11 @@ def pull(project_ids, with_images, chdir, transport):
     help="Only create objects",
     default=True,
 )
-def push(file_fns, project_id, chdir, force, transport, mode):
+@click.option(
+    "--validate/--no-validate",
+    help="Validate archives locally- before upload.",
+)
+def push(file_fns, project_id, chdir, force, transport, mode, validate):
     """
     Push archives to the EcoTaxa server.
 
@@ -255,7 +259,13 @@ def push(file_fns, project_id, chdir, force, transport, mode):
     logging.info("Logged in as %s", remote.current_user()["email"])
     logging.info(f"Transport: {transport}")
 
-    remote.push(file_fn_project_id, force=force, transport=transport, mode=mode)
+    remote.push(
+        file_fn_project_id,
+        force=force,
+        transport=transport,
+        mode=mode,
+        validate=validate,
+    )
 
 
 def _table_reader_writer(fn) -> Tuple[Callable, Callable]:
