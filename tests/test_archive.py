@@ -21,13 +21,10 @@ def test_read_tsv(enforce_types, type_header):
     else:
         file_content = "a\tb\tc\td\n1\t2.0\ta\t\n3\t4.0\tb\t"
 
-    if enforce_types and not type_header:
-        with pytest.raises(ValueError):
-            dataframe = read_tsv(StringIO(file_content), enforce_types=enforce_types)
-        return
-
-    dataframe = read_tsv(StringIO(file_content), enforce_types=enforce_types)
-
+    with contextlib.ExitStack() as ctx:
+        if enforce_types and not type_header:
+            ctx.enter_context(pytest.warns(UserWarning))
+        dataframe = read_tsv(StringIO(file_content), enforce_types=enforce_types)
     assert len(dataframe) == 2
 
     assert list(dataframe.columns) == ["a", "b", "c", "d"]
@@ -50,17 +47,12 @@ def test_read_tsv_usecols(enforce_types, type_header):
     else:
         file_content = "a\tb\tc\td\n1\t2.0\ta\t\n3\t4.0\tb\t"
 
-    if enforce_types and not type_header:
-        with pytest.raises(ValueError):
-            dataframe = read_tsv(
-                StringIO(file_content), enforce_types=enforce_types, usecols=("a", "b")
-            )
-        return
-
-    dataframe = read_tsv(
-        StringIO(file_content), enforce_types=enforce_types, usecols=("a", "b")
-    )
-
+    with contextlib.ExitStack() as ctx:
+        if enforce_types and not type_header:
+            ctx.enter_context(pytest.warns(UserWarning))
+        dataframe = read_tsv(
+            StringIO(file_content), enforce_types=enforce_types, usecols=("a", "b")
+        )
     assert len(dataframe) == 2
 
     assert list(dataframe.columns) == ["a", "b"]

@@ -394,7 +394,6 @@ class Remote(Obervable):
 
     def _get_job(self, job_id) -> Dict:
         """Retrieve details about a job."""
-
         response = requests.get(
             urllib.parse.urljoin(self.config["api_endpoint"], f"jobs/{job_id}/"),
             headers=self.auth_headers,

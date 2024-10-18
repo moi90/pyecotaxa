@@ -34,11 +34,11 @@ setup(
     ],
     python_requires=">=3.6",
     extras_require={
-        "test": [
+        "tests": [
             # Pytest
             "pytest",
             "pytest-cov",
-            "flake8",
+            "ruff",
         ],
         "docs": [
             "sphinx >= 1.4",
@@ -50,9 +50,10 @@ setup(
     entry_points={"console_scripts": ["pyecotaxa=pyecotaxa.cli:cli"]},
     classifiers=[
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.6",
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
         "Operating System :: OS Independent",
         "Development Status :: 3 - Alpha",
