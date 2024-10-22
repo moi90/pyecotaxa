@@ -448,6 +448,49 @@ class Archive:
             # ecotaxa_back/py/BO/TSVFile.py:967
             ...
 
+    def write_tsv(
+        self,
+        dataframe: pd.DataFrame,
+        member_fn: str,
+        encoding="utf-8",
+        type_header=True,
+        formatters: Optional[Mapping] = None,
+        **kwargs,
+    ):
+        """
+        Write a pandas DataFrame to a TSV in the archive.
+
+        This function writes a DataFrame to a TSV file in the archive.
+        Optionally, it includes a type header that specifies the data types
+        for each column, which is required for compatibility with EcoTaxa.
+
+        Args:
+            dataframe (pd.DataFrame):
+                The pandas DataFrame to be written to the TSV file.
+            member_fn (str):
+                The file name inside the archive where the TSV will be written.
+            encoding (str, optional):
+                The encoding to use for writing the file. Defaults to "utf-8".
+            type_header (bool, optional):
+                Whether to include a type header specifying the data types for each column.
+                Defaults to True.
+            formatters (Optional[Mapping], optional):
+                A dictionary specifying formatting functions to apply to columns.
+                Defaults to None.
+            **kwargs:
+                Additional keyword arguments passed to `pandas.DataFrame.to_csv()`.
+        """
+
+        with self.open(member_fn, "w") as f:
+            write_tsv(
+                dataframe,
+                f,
+                encoding=encoding,
+                type_header=type_header,
+                formatters=formatters,
+                **kwargs,
+            )
+
 
 class _TarIO(io.BytesIO):
     def __init__(self, archive: "TarArchive", member_fn) -> None:
