@@ -324,7 +324,7 @@ class Remote(Obervable):
         self._check_version()
 
     def get(self, path, headers: Optional[Mapping] = None, **kwargs):
-        """Retrieve data from the specified path."""
+        """Get data from the specified path."""
         # Build url from API endpoint and supplied path
         url = urllib.parse.urljoin(self.config["api_endpoint"], path)
 
@@ -341,7 +341,7 @@ class Remote(Obervable):
         return response.json()
 
     def post(self, path, headers: Optional[Mapping] = None, **kwargs):
-        """Retrieve data from the specified path."""
+        """Post data to the specified path."""
         # Build url from API endpoint and supplied path
         url = urllib.parse.urljoin(self.config["api_endpoint"], path)
 
@@ -352,6 +352,23 @@ class Remote(Obervable):
             headers = {**self.auth_headers, **headers}
 
         response = self._session.post(url, headers=headers, **kwargs)
+
+        self._check_response(response)
+
+        return response.json()
+    
+    def put(self, path, headers: Optional[Mapping] = None, **kwargs):
+        """Put data to the specified path."""
+        # Build url from API endpoint and supplied path
+        url = urllib.parse.urljoin(self.config["api_endpoint"], path)
+
+        # Build headers
+        if headers is None:
+            headers = self.auth_headers
+        else:
+            headers = {**self.auth_headers, **headers}
+
+        response = self._session.put(url, headers=headers, **kwargs)
 
         self._check_response(response)
 
