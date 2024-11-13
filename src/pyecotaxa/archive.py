@@ -1,5 +1,6 @@
 """Read and write EcoTaxa archives and individual EcoTaxa TSV files."""
 
+import collections
 import csv
 import fnmatch
 import io
@@ -49,6 +50,8 @@ DEFAULT_DTYPES = {
     "acq_id": str,
     "sample_id": str,
 }
+
+VALID_PREFIXES = {"object", "sample", "acq", "process", "img"}
 
 
 def _parse_tsv_header(
@@ -103,17 +106,45 @@ def read_tsv(
     fn_or_f: Union[str, pathlib.Path, IOBase],
     encoding: str = "utf-8-sig",
     dtype=None,
-    enforce_types=True,
     **kwargs,
 ):
     """
-    We just use the type header (if provided) to make sure that the appropriate columns are treated as strings.
+    Read a TSV (Tab-Separated Values) file into a pandas DataFrame.
+
+    This function reads a TSV file and processes the type header (if provided)
+    to ensure the correct dtype for each column.
+    It supports handling files from both file paths and file-like objects.
+
+    The dtype of each column is determined by the following precedence order:
+        1. `dtype` parameter (if provided explicitly).
+        2. DEFAULT_DTYPES, containing the correct dtype for well-known columns.
+        3. File header (if the file includes a type header).
+
+    Args:
+        fn_or_f (str, pathlib.Path, or file-like):
+            The file path or file-like object to read the TSV from.
+        encoding (str, optional):
+            The encoding to use for reading the file. Defaults to "utf-8-sig".
+        dtype (dict, optional):
+            A dictionary specifying the data types of columns. Defaults to `None`,
+            which uses the default types.
+        **kwargs:
+            Additional keyword arguments passed to `pandas.read_csv()`.
+
+    Returns:
+        A pandas DataFrame containing the TSV data.
+
+    Notes:
+        The function detects duplicate column names and raises an error if found.
+        It fills NaN values in string columns with empty strings.
     """
     must_close = False
     f: BinaryIO
 
     if dtype is None:
         dtype = DEFAULT_DTYPES
+    else:
+        dtype = {**DEFAULT_DTYPES, **dtype}
 
     if isinstance(fn_or_f, str):
         fn_or_f = pathlib.Path(fn_or_f)
@@ -136,10 +167,21 @@ def read_tsv(
 
             # Peek the first 8kb and inspect
             header_f = BytesIO(f.peek(8 * 1024))  # type: ignore
-            names, header_dtype, skiprows = _parse_tsv_header(header_f)
+            names, header_dtype, skiprows = _parse_tsv_header(header_f, encoding)
 
-        if enforce_types:
-            dtype = {**dtype, **header_dtype}
+        dtype = {**header_dtype, **dtype}
+
+        # Detect duplicate names
+        duplicate_names = [
+            f"'{name}' ({count}x)"
+            for name, count in collections.Counter(names).items()
+            if count > 1
+        ]
+        if duplicate_names:
+            raise ValueError(
+                "TSV file contains duplicate column names: "
+                + (", ".join(duplicate_names))
+            )
 
         dataframe = pd.read_csv(f, sep="\t", names=names, dtype=dtype, skiprows=skiprows, **kwargs)  # type: ignore
 
@@ -169,22 +211,32 @@ def write_tsv(
     **kwargs,
 ):
     """
-    Write an individual EcoTaxa TSV file.
+    Write a pandas DataFrame to a TSV (Tab-Separated Values) file in EcoTaxa format.
+
+    This function writes a DataFrame to a TSV file. Optionally, it includes a type
+    header that specifies the data types for each column, which is required for
+    compatibility with EcoTaxa.
 
     Args:
-        dataframe: A pandas DataFrame.
-        path_or_buf (str, path object or file-like object): ...
-        encoding: Encoding of the TSV file.
-            With the default "utf-8", both UTF8 and signed UTF8 readers can read the file.
-        enforce_types: Enforce the column dtypes provided in the header.
-            Usually, it is desirable to allow pandas to infer the column dtypes.
-        type_header (bool, default true): Include the type header ([t]/[f]).
-            This is required for a successful import into EcoTaxa.
+        dataframe (pd.DataFrame):
+            The pandas DataFrame to be written to the TSV file.
+        path_or_buf (str, pathlib.Path, file-like, optional):
+            The file path or file-like object where the TSV will be written. If None,
+            the function returns the TSV content as a string. Defaults to None.
+        encoding (str, optional):
+            The encoding to use for writing the file. Defaults to "utf-8".
+        type_header (bool, optional):
+            Whether to include a type header specifying the data types for each column.
+            Defaults to True.
+        formatters (Optional[Mapping], optional):
+            A dictionary specifying formatting functions to apply to columns.
+            Defaults to None.
+        **kwargs:
+            Additional keyword arguments passed to `pandas.DataFrame.to_csv()`.
 
-    Return:
-        None or str
-
-            If path_or_buf is None, returns the resulting csv format as a string. Otherwise returns None.
+    Returns:
+        If `path_or_buf` is provided, the function returns None. If `path_or_buf`
+        is None, it returns the TSV content as a string.
     """
 
     if formatters is None:
@@ -250,6 +302,10 @@ class ArchivePath:
         return ArchivePath(self.archive, posixpath.join(self.filename, filename))
 
 
+class ValidationError(Exception):
+    pass
+
+
 class Archive:
     """
     A generic archive reader and writer for ZIP and TAR archives.
@@ -273,6 +329,8 @@ class Archive:
                     return super(Archive, subclass).__new__(subclass)
 
             raise UnknownArchiveError(f"No handler found to write {archive_fn}")
+
+        raise ValueError("Unknown mode: {mode}")
 
     @staticmethod
     def is_readable(archive_fn) -> bool:
@@ -336,6 +394,103 @@ class Archive:
                 img_file_name, "w"
             ) as f_dst:
                 shutil.copyfileobj(f_src, f_dst)
+
+    def validate(self):
+        """Mimic the validation done by EcoTaxa."""
+
+        # ecotaxa_back/py/BO/Bundle.py:43
+        MAX_FILES = 2000
+
+        tsv: pd.DataFrame
+
+        for i, (tsv_fn, tsv) in enumerate(self.iter_tsv(), start=1):
+            if i > MAX_FILES:
+                raise ValidationError(
+                    f"Archive contains too many files, max. is {MAX_FILES}"
+                )
+
+            errors = []
+
+            # Validate columns (validate_structure)
+            # ecotaxa_back/py/BO/TSVFile.py:873
+            for c in tsv.columns:
+                if c in DEFAULT_DTYPES:
+                    # This is a known field
+                    # TODO: Check dtype
+                    continue
+
+                try:
+                    prefix, name = c.split("_", 1)
+                except ValueError:
+                    errors.append(
+                        f"Invalid field '{c}', format must be '<prefix>_<name>'"
+                    )
+                    continue
+
+                if prefix not in VALID_PREFIXES:
+                    errors.append(f"Invalid prefix '{prefix}' for column '{c}'")
+                    continue
+
+            # Ensure that each used prefix contains at least an ID
+            for prefix in ["object", "acq", "process", "sample"]:
+                expected_id = f"{prefix}_id"
+                prefix_columns = [c for c in tsv.columns if c.startswith(prefix)]
+                if prefix_columns and expected_id not in tsv.columns:
+                    errors.append(
+                        f"Field {expected_id} is mandatory as there are some '{prefix}' columns: {sorted(prefix_columns)}."
+                    )
+
+            if errors:
+                raise ValidationError(
+                    f"Invalid structure in {tsv_fn}:\n" + ("\n".join(errors))
+                )
+
+            # TODO: Validate contents (validate_content)
+            # ecotaxa_back/py/BO/TSVFile.py:967
+            ...
+
+    def write_tsv(
+        self,
+        dataframe: pd.DataFrame,
+        member_fn: str,
+        encoding="utf-8",
+        type_header=True,
+        formatters: Optional[Mapping] = None,
+        **kwargs,
+    ):
+        """
+        Write a pandas DataFrame to a TSV in the archive.
+
+        This function writes a DataFrame to a TSV file in the archive.
+        Optionally, it includes a type header that specifies the data types
+        for each column, which is required for compatibility with EcoTaxa.
+
+        Args:
+            dataframe (pd.DataFrame):
+                The pandas DataFrame to be written to the TSV file.
+            member_fn (str):
+                The file name inside the archive where the TSV will be written.
+            encoding (str, optional):
+                The encoding to use for writing the file. Defaults to "utf-8".
+            type_header (bool, optional):
+                Whether to include a type header specifying the data types for each column.
+                Defaults to True.
+            formatters (Optional[Mapping], optional):
+                A dictionary specifying formatting functions to apply to columns.
+                Defaults to None.
+            **kwargs:
+                Additional keyword arguments passed to `pandas.DataFrame.to_csv()`.
+        """
+
+        with self.open(member_fn, "w") as f:
+            write_tsv(
+                dataframe,
+                f,
+                encoding=encoding,
+                type_header=type_header,
+                formatters=formatters,
+                **kwargs,
+            )
 
 
 class _TarIO(io.BytesIO):

@@ -36,6 +36,8 @@ from pyecotaxa._config import (
 from pyecotaxa.meta import FileMeta
 from tqdm.auto import tqdm
 
+from .archive import Archive
+
 logger = logging.getLogger(__name__)
 
 
@@ -412,7 +414,6 @@ class Remote(Obervable):
 
     def _get_job(self, job_id) -> Dict:
         """Retrieve details about a job."""
-
         response = requests.get(
             urllib.parse.urljoin(self.config["api_endpoint"], f"jobs/{job_id}/"),
             headers=self.auth_headers,
@@ -1017,7 +1018,7 @@ class Remote(Obervable):
                     {"file": (name, f), "path": src_fn, "tag": tag}
                 )
                 mm = requests_toolbelt.MultipartEncoderMonitor(
-                    me, lambda monitor: pm.set(monitor.bytes_read)
+                    me, lambda monitor: setattr(pm, "n", monitor.bytes_read)
                 )
                 response = self._session.post(
                     urllib.parse.urljoin(self.config["api_endpoint"], f"my_files/"),
@@ -1119,8 +1120,13 @@ class Remote(Obervable):
         force=False,
         mode: ImportMode = ImportMode.CREATE,
         transport: Transport = Transport.HTTP,
+        validate: bool = False,
     ):
         logger.info(f"Pushing {src_fn} to {project_id}...")
+
+        if validate:
+            Archive(src_fn).validate()
+            logger.info(f"Archive {src_fn} seems to be valid.")
 
         if transport == Transport.SHARE:
             if self.config["import_data_share"] is None:
@@ -1138,7 +1144,10 @@ class Remote(Obervable):
         # Find running or finished import task for project_id
         jobs = self._get_jobs(
             type="FileImport",
-            params={"prj_id": project_id, "req": {"source_path": remote_fn}},
+            params={
+                "prj_id": project_id,
+                "req": {"source_path": remote_fn, "update_mode": mode.value},
+            },
         )
 
         # Only look for non-failed jobs
@@ -1179,6 +1188,7 @@ class Remote(Obervable):
         force=False,
         mode: ImportMode = ImportMode.CREATE,
         transport: Transport = Transport.HTTP,
+        validate: bool = False,
     ):
         """
         Push a local checkout to EcoTaxa.
@@ -1196,29 +1206,24 @@ class Remote(Obervable):
         else:
             executor = DummyExecutor()
 
-        [
-            self._push_individual_archive(
-                file_fn, project_id, force=force, mode=mode, transport=transport
+        futures = [
+            executor.submit(
+                self._push_individual_archive,
+                file_fn,
+                project_id,
+                force=force,
+                mode=mode,
+                transport=transport,
+                validate=validate,
             )
             for file_fn, project_id in file_fn_project_id
         ]
 
-        # futures = [
-        #     executor.submit(
-        #         self._push_individual_archive,
-        #         file_fn,
-        #         project_id,
-        #     )
-        #     for file_fn, project_id in file_fn_project_id
-        # ]
+        try:
+            for fut in tqdm(
+                concurrent.futures.as_completed(futures), total=len(futures)
+            ):
+                fut.result()
 
-        # try:
-        #     with progress_meter(
-        #         "total", unit="B", unit_scale=True, unit_divisor=1024, total=len(futures)
-        #     ) as pm:
-        #         for fut in concurrent.futures.as_completed(futures):
-        #             fut.result()
-        #             pm.update()
-
-        # finally:
-        #     executor.shutdown()
+        finally:
+            executor.shutdown()
