@@ -223,7 +223,10 @@ def pull(project_ids, with_images, chdir, transport):
     "--validate/--no-validate",
     help="Validate archives locally- before upload.",
 )
-def push(file_fns, project_id, chdir, force, transport, mode, validate):
+@click.option(
+    "-j", "--n-workers", type=int, help="Number of parallel workers.", default=1
+)
+def push(file_fns, project_id, chdir, force, transport, mode, validate, n_workers):
     """
     Push archives to the EcoTaxa server.
 
@@ -261,6 +264,7 @@ def push(file_fns, project_id, chdir, force, transport, mode, validate):
 
     remote.push(
         file_fn_project_id,
+        n_parallel=n_workers,
         force=force,
         transport=transport,
         mode=mode,

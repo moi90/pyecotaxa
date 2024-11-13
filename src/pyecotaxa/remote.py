@@ -1213,8 +1213,9 @@ class Remote(Obervable):
         else:
             executor = DummyExecutor()
 
-        [
-            self._push_individual_archive(
+        futures = [
+            executor.submit(
+                self._push_individual_archive,
                 file_fn,
                 project_id,
                 force=force,
@@ -1225,22 +1226,11 @@ class Remote(Obervable):
             for file_fn, project_id in file_fn_project_id
         ]
 
-        # futures = [
-        #     executor.submit(
-        #         self._push_individual_archive,
-        #         file_fn,
-        #         project_id,
-        #     )
-        #     for file_fn, project_id in file_fn_project_id
-        # ]
+        try:
+            for fut in tqdm(
+                concurrent.futures.as_completed(futures), total=len(futures)
+            ):
+                fut.result()
 
-        # try:
-        #     with progress_meter(
-        #         "total", unit="B", unit_scale=True, unit_divisor=1024, total=len(futures)
-        #     ) as pm:
-        #         for fut in concurrent.futures.as_completed(futures):
-        #             fut.result()
-        #             pm.update()
-
-        # finally:
-        #     executor.shutdown()
+        finally:
+            executor.shutdown()
