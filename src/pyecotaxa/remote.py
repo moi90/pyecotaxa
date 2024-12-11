@@ -157,78 +157,6 @@ def match_request(request: Mapping, pattern: Mapping):
     return not differences
 
 
-class State(enum.Enum):
-    FINISHED = 0
-    RUNNING = 1
-    FAILED = 2
-    WAITING = 3
-
-
-class ProgressListener:
-    def __init__(self) -> None:
-        self.progress_bars = {}
-
-    def update(
-        self,
-        target,
-        state: Optional[State] = None,
-        message: Optional[str] = None,
-        description: Optional[str] = None,
-        progress: Optional[int] = None,
-        total: Optional[int] = None,
-        unit: Optional[str] = None,
-    ):
-        try:
-            progress_bar = self.progress_bars[target]
-        except KeyError:
-            progress_bar = self.progress_bars[target] = tqdm(
-                position=0 if target is None else None, unit_scale=True
-            )
-
-        if progress_bar.disable:
-            # Progress bar is already closed
-            return
-
-        if message is not None:
-            if target is not None:
-                message = f"{target}: {message}"
-            progress_bar.write(message)
-
-        if description is not None:
-            if target is not None:
-                description = f"{target}: {description}"
-            progress_bar.set_description(description, refresh=False)
-
-        if progress is not None:
-            progress_bar.n = progress
-
-        if total is not None:
-            progress_bar.total = total
-
-        if unit is not None:
-            progress_bar.unit = unit
-        else:
-            progress_bar.unit = "it"
-
-        if state == State.FINISHED:
-            progress_bar.close()
-        else:
-            progress_bar.refresh()
-
-
-class Obervable:
-    def __init__(self) -> None:
-        self.__observers = []
-
-    def register_observer(self, fn):
-        self.__observers.append(fn)
-        return fn
-
-    def _notify_observers(self, *args, **kwargs):
-        for fn in self.__observers:
-            fn(*args, **kwargs)
-
-
 def _value_matches_query(value, query) -> bool:
     if isinstance(value, Mapping) and isinstance(query, Mapping):
         _none = object()
@@ -258,7 +186,7 @@ def _file_hash(f) -> str:
     return fhash.hexdigest()
 
 
-class Remote(Obervable):
+class Remote:
     """
     Interact with a remote EcoTaxa server.
 
@@ -486,23 +414,26 @@ class Remote(Obervable):
         (remote_fn,) = matches
         filename = os.path.basename(remote_fn)
 
-        # Local filename should not have the task_<id>_ prefix to match get_job_file_remote
-        dest = os.path.join(target_directory, removeprefix(filename, f"task_{job_id}_"))
+        dest_fn = os.path.join(
+            target_directory,
+            # Destination filename should not have the task_<id>_ prefix to match get_job_file_remote
+            removeprefix(filename, f"task_{job_id}_"),
+        )
 
-        logger.info(f"Copying {remote_fn} to {dest}...")
+        logger.info(f"Copying {remote_fn} to {dest_fn}...")
 
         try:
-            copyfile_progress(remote_fn, dest)
-            shutil.copymode(remote_fn, dest)
+            copyfile_progress(remote_fn, dest_fn)
+            shutil.copymode(remote_fn, dest_fn)
         except:
             # Cleaup destination file
             try:
-                os.remove(dest)
+                os.remove(dest_fn)
             except FileNotFoundError:
                 pass
             raise
 
-        return dest
+        return dest_fn
 
     def _get_job_file_ftp(self, project_id, job_id, *, target_directory: str) -> str:
         """Download an exported archive over FTP and return the local file name."""
@@ -531,16 +462,21 @@ class Remote(Obervable):
 
             size = ftp.size(remote_fn)
 
-            name = os.path.basename(remote_fn)
-            local_filename = os.path.join(target_directory, name)
+            filename = posixpath.basename(remote_fn)
+
+            dest_fn = os.path.join(
+                target_directory,
+                # Destination filename should not have the task_<id>_ prefix to match get_job_file_remote
+                removeprefix(filename, f"task_{job_id}_"),
+            )
 
             with tqdm(
                 unit="iB",
                 unit_scale=True,
                 unit_divisor=1024,
                 total=size,
-                desc=f"Downloading {name}...",
-            ) as pm, atomic_write(local_filename) as fout:
+                desc=f"Downloading {filename}...",
+            ) as pm, atomic_write(dest_fn) as fout:
 
                 def writeblock(block: bytes):
                     fout.write(block)
@@ -548,7 +484,7 @@ class Remote(Obervable):
 
                 ftp.retrbinary(f"RETR {remote_fn}", callback=writeblock)
 
-            return local_filename
+            return dest_fn
 
     def _get_job_file(
         self, project_id, job, *, target_directory: str, transport: Transport
@@ -596,13 +532,7 @@ class Remote(Obervable):
 
         job_id = data["job_id"]
 
-        self._notify_observers(
-            project_id,
-            description=f"Enqueued export job.",
-            progress=0,
-            total=100,
-            state=State.WAITING,
-        )
+        logger.info(f"Enqueued export job for project {project_id}.")
 
         # Get job data
         return self._get_job(job_id)
@@ -719,33 +649,18 @@ class Remote(Obervable):
         return archive_fn
 
     def _check_archive(self, project_id, archive_fn):
-        self._notify_observers(
-            project_id, description=f"Checking archive...", progress=0, total=1
-        )
+        logger.info(f"Checking {archive_fn} ({project_id})...")
 
         try:
             with zipfile.ZipFile(archive_fn) as zf:
                 zf.testzip()
         except Exception:
-            self._notify_observers(
-                project_id, description=f"Checking archive...", state=State.FAILED
-            )
             raise
-
-        self._notify_observers(
-            project_id, description=f"Checking archive...", progress=1, total=1
-        )
 
     def _cleanup_task_data(self, project_id):
         # Find finished export task for project_id
 
-        self._notify_observers(
-            project_id,
-            description=f"Cleaning up...",
-            progress=0,
-            total=1,
-            state=State.RUNNING,
-        )
+        logger.info(f"Cleaning up export task data for {project_id}...")
 
         jobs = self._get_jobs()
 
@@ -764,14 +679,6 @@ class Remote(Obervable):
             )
 
             self._check_response(response)
-
-        self._notify_observers(
-            project_id,
-            description=f"Cleaning up...",
-            progress=1,
-            total=1,
-            state=State.RUNNING,
-        )
 
     def _pull_individual_project(
         self,
@@ -811,18 +718,9 @@ class Remote(Obervable):
             if cleanup_task_data:
                 self._cleanup_task_data(project_id)
         except Exception as exc:
-            self._notify_observers(
-                project_id,
-                description=f"FAILED ({exc})",
-                progress=1,
-                total=1,
-                state=State.FINISHED,
-            )
             raise exc
 
-        self._notify_observers(
-            project_id, description="OK", progress=1, total=1, state=State.FINISHED
-        )
+        logger.info(f"Project {project_id} OK.")
 
         return archive_fn
 
@@ -882,9 +780,7 @@ class Remote(Obervable):
         else:
             executor = DummyExecutor()
 
-        self._notify_observers(
-            None, description="Pulling projects...", total=len(project_ids), unit="proj"
-        )
+        logger.info("Pulling projects...")
 
         futures = [
             executor.submit(
@@ -907,8 +803,6 @@ class Remote(Obervable):
                 concurrent.futures.as_completed(futures)
             ):
                 archive_fn = archive_fn_future.result()
-
-                self._notify_observers(None, progress=i + 1, unit="proj")
 
                 archive_fns.append(archive_fn)
 
