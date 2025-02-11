@@ -1,5 +1,6 @@
 import datetime
 import getpass
+import logging
 import os
 import sys
 import warnings
@@ -10,15 +11,13 @@ from typing import Callable, NoReturn, Optional, Tuple
 import click
 import dateutil.parser
 import pandas as pd
-import requests
-
 import pyecotaxa
 import pyecotaxa.taxonomy
+import requests
 from pyecotaxa._config import JsonConfig, find_file_recursive
-from pyecotaxa.archive import read_tsv, write_tsv
+from pyecotaxa.archive import Archive, read_tsv, write_tsv
 from pyecotaxa.meta import FileMeta
 from pyecotaxa.remote import ImportMode, ProgressListener, Remote, Transport
-import logging
 
 warnings.simplefilter("error", pd.errors.DtypeWarning)
 
@@ -690,3 +689,77 @@ def pull_taxonomy(
     taxa = pd.DataFrame(taxa)
 
     taxa.to_csv(taxonomy_fn, index=False)
+
+
+# Add the fix_bbox command to the CLI
+@cli.command()
+@click.argument("input_arch_fn")
+@click.argument("output_tsv_fn")
+@click.option(
+    "--fix-bbox",
+    type=click.Choice(["LOKI"], case_sensitive=False),
+    default=None,
+    help="Fix bounding boxes for LOKI-style metadata.",
+)
+def extract_meta(
+    input_arch_fn: str,
+    output_tsv_fn: str,
+    fix_bbox: str,
+):
+    """
+    Extract metadata of all objects in the archive and write to a new TSV file.
+
+
+    If --fix-bbox LOKI is given, object_{posx,posy} are extracted from object_id and object_{width,height} are extracted from the image file.
+    """
+
+    import parse
+    import PIL.Image
+    import posixpath
+    from tqdm import tqdm
+
+    tqdm.pandas()
+
+    object_id_fmt = "{object_date} {object_time}  {object_milliseconds}  {object_sequence:06d} {object_posx:04d} {object_posy:04d}"
+    object_id_parser = parse.compile(object_id_fmt)
+
+    def _extract_xy_loki(object_id: str):
+        result = object_id_parser.parse(object_id)
+        if result is None:
+            raise ValueError(f"Can not parse object ID: {object_id}")
+
+        return pd.Series([result.named["object_posx"], result.named["object_posy"]])
+
+    def _extract_wh_loki(archive: Archive, tsv_root, img_file_name):
+        with archive.open(posixpath.join(tsv_root, img_file_name)) as f:
+            image = PIL.Image.open(f)
+
+        return pd.Series(image.size)
+
+    with Archive(input_arch_fn) as arch:
+        _metadata = []
+        for tsv_fn, tsv in arch.iter_tsv():
+            print(f"Processing {input_arch_fn}/{tsv_fn}...")
+
+            if fix_bbox is None:
+                pass
+            elif fix_bbox == "LOKI":
+                print("Fixing bounding boxes using LOKI-style metadata...")
+                tsv_root = os.path.dirname(tsv_fn)
+                # Extract object_posx / object_posy from object_id
+                tsv[["object_posx", "object_posy"]] = tsv["object_id"].progress_apply(
+                    _extract_xy_loki
+                )
+
+                # Extract object_width, object_height from image
+                tsv[["object_width", "object_height"]] = tsv[
+                    "img_file_name"
+                ].progress_apply(partial(_extract_wh_loki, arch, tsv_root))
+            else:
+                raise ValueError(f"Unknown fix_bbox: {fix_bbox}")
+
+            _metadata.append(tsv)
+
+    metadata = pd.concat(_metadata)
+
+    write_tsv(metadata, output_tsv_fn)

@@ -26,7 +26,7 @@ from typing import (
 import pandas as pd
 from tqdm.auto import tqdm
 
-__all__ = ["read_tsv", "write_tsv"]
+__all__ = ["read_tsv", "write_tsv", "Archive"]
 
 
 DEFAULT_DTYPES = {
