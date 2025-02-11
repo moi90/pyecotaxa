@@ -295,6 +295,8 @@ def _table_reader_writer(fn) -> Tuple[Callable, Callable]:
             pd.read_excel, fn, index_col=False, header=0, dtype=str
         ), partial(pd.DataFrame.to_excel, index=False)
 
+    raise ValueError(f"Unknown file extension: {ext}")  # pragma: no cover
+
 
 def _abort(message, retval=-1) -> NoReturn:
     print(message, file=sys.stderr)
