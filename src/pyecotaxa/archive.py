@@ -408,6 +408,11 @@ class Archive:
                 raise ValidationError(
                     f"Archive contains too many files, max. is {MAX_FILES}"
                 )
+            
+            if not posixpath.basename(tsv_fn).startswith("ecotaxa"):
+                raise ValidationError(
+                    f"Invalid filename: {tsv_fn} has to start with 'ecotaxa'"
+                )
 
             errors = []
 
