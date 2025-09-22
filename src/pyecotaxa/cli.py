@@ -17,7 +17,7 @@ import pyecotaxa.taxonomy
 from pyecotaxa._config import JsonConfig, find_file_recursive
 from pyecotaxa.archive import read_tsv, write_tsv
 from pyecotaxa.meta import FileMeta
-from pyecotaxa.remote import ImportMode, ProgressListener, Remote, Transport
+from pyecotaxa.remote import ImportMode, Remote, Transport
 import logging
 
 warnings.simplefilter("error", pd.errors.DtypeWarning)
@@ -50,6 +50,13 @@ def cli(verbose):  # pragma: no cover
     default=True,
     help="Store the API token in the user directory ~/.pyecotaxa (Default)",
 )
+@click.option(
+    "--local",
+    "destination",
+    flag_value="local",
+    default=False,
+    help="Store the API token in local .pyecotaxa.json",
+)
 @click.option("--local", "destination", flag_value="local")
 @click.option(
     "--chdir",
@@ -78,9 +85,6 @@ def login(chdir, destination, verbose):
         else find_file_recursive(".pyecotaxa.json")
     )
 
-    if verbose:
-        print("Config:", config_fn)
-
     username = input("Username: ")
     password = getpass.getpass()
 
@@ -101,6 +105,7 @@ def login(chdir, destination, verbose):
     print(f"Logged in successfully as {email}.")
 
     JsonConfig(config_fn).update(api_token=api_token).save()
+    print(f"Token stored in {config_fn}")
 
 
 @cli.command()
@@ -150,8 +155,6 @@ def pull(project_ids, with_images, chdir, transport):
     if chdir:
         os.chdir(chdir)
 
-    progress_listener = ProgressListener()
-
     remote = Remote()
 
     if transport is None:
@@ -163,7 +166,6 @@ def pull(project_ids, with_images, chdir, transport):
     else:
         transport = Transport(transport)
 
-    remote.register_observer(progress_listener.update)
     remote.pull(project_ids, with_images=with_images, transport=transport)
 
 
