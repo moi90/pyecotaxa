@@ -555,7 +555,7 @@ class Remote:
 
     def _get_jobs(self, type=None, params=None):
         jobs = self.get(
-            "jobs",
+            "jobs/",
             params={"for_admin": False},
         )
 
