@@ -355,6 +355,25 @@ class Remote:
 
         return api_token
 
+    def ensure_login_interactive(self):
+        """
+        Ensure that the user is logged in.
+        If not, prompt interactively for username and password.
+        """
+
+        if self.is_logged_in():
+            return
+
+        import getpass
+
+        print(
+            "Please enter your EcoTaxa credentials for {self.config['api_endpoint']}:"
+        )
+        username = input("Username: ")
+        password = getpass.getpass("Password: ")
+
+        self.login(username, password)
+
     @property
     def auth_headers(self):
         if not self.config["api_token"]:
@@ -452,6 +471,23 @@ class Remote:
             raise
 
         return dest_fn
+
+    def validate_ftp_config(
+        self, ftp_host=None, ftp_user=None, ftp_passwd=None, ftp_export_dir=None
+    ):
+        """Check if the FTP configuration is valid."""
+
+        ftp_host = ftp_host or self.config["ftp_host"]
+        ftp_user = ftp_user or self.config["ftp_user"]
+        ftp_passwd = ftp_passwd or self.config["ftp_passwd"]
+        ftp_export_dir = ftp_export_dir or self.config["ftp_export_dir"]
+
+        with ftplib.FTP(
+            ftp_host,
+            ftp_user,
+            ftp_passwd,
+        ) as ftp:
+            ftp.cwd(ftp_export_dir)
 
     def _get_job_file_ftp(self, project_id, job_id, *, target_directory: str) -> str:
         """Download an exported archive over FTP and return the local file name."""
@@ -824,6 +860,16 @@ class Remote:
 
     def current_user(self):
         return self.get("users/me")
+
+    def is_logged_in(self):
+        try:
+            self.current_user()
+            return True
+        except requests.exceptions.HTTPError as exc:
+            response = exc.response
+            if response is not None and response.status_code == 401:
+                return False
+            raise
 
     def _start_project_import(self, project_id, source_path, mode: ImportMode):
         logger.info("Starting project import...")

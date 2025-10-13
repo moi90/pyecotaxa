@@ -1,4 +1,5 @@
 import datetime
+import ftplib
 import getpass
 import os
 import sys
@@ -65,12 +66,17 @@ def cli(verbose):  # pragma: no cover
     help="Run as if started in PATH instead of the current working directory.",
 )
 @click.option(
+    "--ftp",
+    is_flag=True,
+    help="Also store FTP credentials.",
+)
+@click.option(
     "-v",
     "--verbose",
     is_flag=True,
     help="Be verbose",
 )
-def login(chdir, destination, verbose):
+def login(chdir, destination, ftp, verbose):
     """
     Log in and store authentication token in the current working directory.
     """
@@ -104,7 +110,24 @@ def login(chdir, destination, verbose):
 
     print(f"Logged in successfully as {email}.")
 
-    JsonConfig(config_fn).update(api_token=api_token).save()
+    new_config = {
+        "api_token": api_token,
+    }
+
+    if ftp:
+        ftp_user = input("FTP Username: ")
+        ftp_passwd = getpass.getpass("FTP Password: ")
+
+        remote.validate_ftp_config(ftp_user=ftp_user, ftp_passwd=ftp_passwd)
+
+        new_config.update(
+            {
+                "ftp_user": ftp_user,
+                "ftp_passwd": ftp_passwd,
+            }
+        )
+
+    JsonConfig(config_fn).update(**new_config).save()
     print(f"Token stored in {config_fn}")
 
 
@@ -156,6 +179,7 @@ def pull(project_ids, with_images, chdir, transport):
         os.chdir(chdir)
 
     remote = Remote()
+    remote.ensure_login_interactive()
 
     if transport is None:
         transport = (
@@ -165,6 +189,9 @@ def pull(project_ids, with_images, chdir, transport):
         )
     else:
         transport = Transport(transport)
+
+    if transport == Transport.FTP:
+        remote.validate_ftp_config()
 
     remote.pull(project_ids, with_images=with_images, transport=transport)
 
@@ -249,6 +276,7 @@ def push(file_fns, project_id, chdir, force, transport, mode, validate, n_worker
         file_fn_project_id = [(file_fn, project_id) for file_fn in file_fns]
 
     remote = Remote()
+    remote.ensure_login_interactive()
 
     if transport is None:
         transport = (
@@ -585,7 +613,7 @@ def gen_annotation_update(
         out_data = out_data[out_data.columns[~out_data.columns.isin(base_drop)]]
 
         print(
-            f"Updated {len(out_data):,d} objects out of {len(base_data):,d} ({len(out_data)/len(base_data):.2%})"
+            f"Updated {len(out_data):,d} objects out of {len(base_data):,d} ({len(out_data) / len(base_data):.2%})"
         )
 
         if "object_annotation_status" not in out_data.columns:
@@ -632,6 +660,7 @@ def pull_taxonomy(
         os.chdir(chdir)
 
     remote = Remote()
+    remote.ensure_login_interactive()
 
     if root_category is not None:
         if project_id is None:
