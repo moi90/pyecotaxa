@@ -15,7 +15,7 @@ import urllib.parse
 import uuid
 import warnings
 import zipfile
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 import requests
 import requests.adapters
@@ -194,6 +194,7 @@ class Remote:
         n_workers=1,
         import_data_share: Union[None, str, bool] = None,
         verbose=False,
+        retry: Union[int, Literal[False]] = 3,
     ):
         super().__init__()
 
@@ -233,10 +234,11 @@ class Remote:
         self.n_workers = n_workers
         # TODO: Use session everywhere
         self._session = requests.Session()
-        retry = urllib3.util.retry.Retry(connect=3, backoff_factor=0.5)
-        adapter = requests.adapters.HTTPAdapter(max_retries=retry)
-        self._session.mount("http://", adapter)
-        self._session.mount("https://", adapter)
+        if retry:
+            retry_cfg = urllib3.util.retry.Retry(retry, backoff_factor=0.5)
+            adapter = requests.adapters.HTTPAdapter(max_retries=retry_cfg)
+            self._session.mount("http://", adapter)
+            self._session.mount("https://", adapter)
 
         self._check_version()
 
