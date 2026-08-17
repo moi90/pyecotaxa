@@ -493,20 +493,12 @@ class Remote(Obervable):
         try:
             copyfile_progress(remote_fn, dest)
             shutil.copymode(remote_fn, dest)
-
-        try:
-            copyfile_progress(remote_fn, dest)
-            shutil.copymode(remote_fn, dest)
         except:
             # Cleaup destination file
             try:
                 os.remove(dest)
             except FileNotFoundError:
                 pass
-<<<<<<< HEAD:src/pyecotaxa/remote.py
-            
-=======
->>>>>>> 0ed3561 (Improvements):pyecotaxa/remote.py
             raise
 
         return dest
